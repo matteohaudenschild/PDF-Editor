@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+backend/.venv/
+backend/python-embed/
+
+# Build output
+dist/
+*.exe
+scripts/.generated/
+
+# Runtime and caches
+backend/runtime/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local/debug artifacts
+.claude/
+tmp/
+tmp*/
+.tmp_test/
+*.log
+test_ocr.py
+
+# Customer/test documents and generated previews
+*.pdf
+*.png
+*.jpg
+*.jpeg
+backend/tessdata/configs/
+backend/tessdata/tessconfigs/
+
+# Local OS/editor files
+.DS_Store
+Thumbs.db
+*.swp

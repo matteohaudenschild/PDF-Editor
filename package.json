@@ -1,0 +1,19 @@
+{
+  "name": "pdf-desktop-editor",
+  "version": "0.1.0",
+  "description": "Local desktop PDF text editor with Electron, FastAPI, and PyMuPDF",
+  "main": "app/src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "check:renderer": "node --check app/src/renderer/renderer.js",
+    "backend:run": "backend\\.venv\\Scripts\\python.exe backend\\server.py --port 8765",
+    "build:portable": "node scripts/build-portable.js",
+    "build:installer": "node scripts/build-installer.js",
+    "build:win": "node scripts/build-installer.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^41.2.1"
+  }
+}

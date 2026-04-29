@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Editor</title>
+  <link rel="stylesheet" href="./styles.css?v=2026-04-29-auto-ocr-learning-hidden-1">
+</head>
+<body>
+  <h1>PDF Editor</h1>
+  <input type="file" id="webPdfInput" accept="application/pdf" hidden>
+
+  <div id="toolbar">
+    <button type="button" id="openButton">PDF laden</button>
+    <button type="button" id="templateLearningButton" hidden>Lernmodus</button>
+    <input type="text" id="templateNameInput" placeholder="Vorlagenname" hidden>
+    <button type="button" id="saveTemplateButton" hidden>Vorlage speichern</button>
+    <button type="button" id="whiteboardPenButton">Stift</button>
+    <button type="button" id="whiteboardEraserButton">Radierer</button>
+    <label id="whiteboardColorLabel" for="whiteboardColorInput">Farbe</label>
+    <input type="color" id="whiteboardColorInput" value="#000000" aria-label="Stiftfarbe">
+    <label id="whiteboardThicknessLabel" for="whiteboardThicknessInput">Dicke</label>
+    <input type="range" id="whiteboardThicknessInput" min="1" max="24" step="1" value="3" aria-label="Stiftdicke">
+    <span id="whiteboardThicknessValue">3 px</span>
+    <button type="button" id="whiteboardClearButton">Whiteboard leeren</button>
+    <button type="button" id="whiteboardUndoButton" title="Whiteboard: ein Schritt zurück" aria-label="Whiteboard: ein Schritt zurück">&#8592;</button>
+    <button type="button" id="whiteboardRedoButton" title="Whiteboard: ein Schritt vor" aria-label="Whiteboard: ein Schritt vor">&#8594;</button>
+    <button type="button" id="prevButton">Vorherige Seite</button>
+    <button type="button" id="nextButton">Nächste Seite</button>
+    <button type="button" id="zoomOutButton">Zoom -</button>
+    <button type="button" id="zoomFitButton">Fit</button>
+    <button type="button" id="zoomInButton">Zoom +</button>
+    <button type="button" id="saveDraftButton" hidden>Entwurf speichern</button>
+    <button type="button" id="exportButton">PDF exportieren</button>
+    <button type="button" id="revealButton">Export zeigen</button>
+  </div>
+
+  <div id="status">Bereit.</div>
+  <div id="meta">Keine PDF geladen.</div>
+  <div id="errors"></div>
+
+  <div id="pageArea">
+    <div id="whiteboardContainer">
+      <canvas id="whiteboardCanvas" aria-label="Whiteboard"></canvas>
+      <div id="whiteboardCursor" hidden aria-hidden="true"></div>
+    </div>
+    <div id="pageContainer" hidden>
+      <img id="backgroundImage" alt="" hidden>
+      <div id="textLayer"></div>
+    </div>
+  </div>
+
+  <script src="./renderer.js?v=2026-04-29-auto-ocr-learning-hidden-1"></script>
+</body>
+</html>
