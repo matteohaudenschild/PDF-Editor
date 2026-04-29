@@ -24,6 +24,26 @@ body {
   margin-bottom: 8px;
 }
 
+#updateBanner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid #b08900;
+  background: #fff7d6;
+  color: #2b2300;
+}
+
+#updateBanner[hidden] {
+  display: none !important;
+}
+
+#updateMessage {
+  font-weight: 600;
+}
+
 #errors {
   margin-bottom: 12px;
   color: #900;

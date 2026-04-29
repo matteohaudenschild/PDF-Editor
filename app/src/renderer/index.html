@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PDF Editor</title>
-  <link rel="stylesheet" href="./styles.css?v=2026-04-29-auto-ocr-learning-hidden-1">
+  <link rel="stylesheet" href="./styles.css?v=2026-04-29-updater-1">
 </head>
 <body>
   <h1>PDF Editor</h1>
@@ -36,6 +36,11 @@
   </div>
 
   <div id="status">Bereit.</div>
+  <div id="updateBanner" hidden>
+    <span id="updateMessage"></span>
+    <button type="button" id="updateInstallButton">Jetzt installieren</button>
+    <button type="button" id="updateDismissButton">Später</button>
+  </div>
   <div id="meta">Keine PDF geladen.</div>
   <div id="errors"></div>
 
@@ -50,6 +55,6 @@
     </div>
   </div>
 
-  <script src="./renderer.js?v=2026-04-29-auto-ocr-learning-hidden-1"></script>
+  <script src="./renderer.js?v=2026-04-29-updater-1"></script>
 </body>
 </html>

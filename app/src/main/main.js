@@ -1,12 +1,18 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const net = require("net");
+const https = require("https");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 
 let mainWindow = null;
 let backendProcess = null;
 let serviceBaseUrl = null;
+
+const UPDATE_REPOSITORY = "matteohaudenschild/PDF-Editor";
+const UPDATE_ASSET_NAME = "PDF Desktop Editor Setup.exe";
+const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
 
 function getProjectRoot() {
   if (app.isPackaged) {
@@ -34,6 +40,209 @@ function getBackendRoot() {
 
 function getAppIconPath() {
   return path.join(getProjectRoot(), "app", "assets", "pdf-editor-icon.ico");
+}
+
+function normalizeReleaseVersion(value) {
+  return String(value || "").trim().replace(/^v/i, "");
+}
+
+function compareVersions(left, right) {
+  const leftParts = normalizeReleaseVersion(left).split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = normalizeReleaseVersion(right).split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = leftParts[index] || 0;
+    const rightPart = rightParts[index] || 0;
+    if (leftPart > rightPart) {
+      return 1;
+    }
+    if (leftPart < rightPart) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+function githubRequestBuffer(url, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      url,
+      {
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "User-Agent": "PDF-Desktop-Editor-Updater",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      },
+      (response) => {
+        const location = response.headers.location;
+        if (response.statusCode >= 300 && response.statusCode < 400 && location) {
+          response.resume();
+          if (redirectCount >= 5) {
+            reject(new Error("Zu viele Weiterleitungen beim Update-Download."));
+            return;
+          }
+          githubRequestBuffer(new URL(location, url).toString(), redirectCount + 1).then(resolve, reject);
+          return;
+        }
+
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          const body = Buffer.concat(chunks);
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            reject(new Error(`GitHub antwortete mit Status ${response.statusCode}: ${body.toString("utf8").slice(0, 300)}`));
+            return;
+          }
+          resolve(body);
+        });
+      },
+    );
+
+    request.setTimeout(30000, () => {
+      request.destroy(new Error("Update-Pruefung hat zu lange gedauert."));
+    });
+    request.on("error", reject);
+  });
+}
+
+async function githubRequestJson(url) {
+  const buffer = await githubRequestBuffer(url);
+  return JSON.parse(buffer.toString("utf8"));
+}
+
+function findInstallerAsset(release) {
+  const assets = Array.isArray(release?.assets) ? release.assets : [];
+  return assets.find((asset) => asset?.name === UPDATE_ASSET_NAME)
+    || assets.find((asset) => String(asset?.name || "").toLowerCase().endsWith(".exe"));
+}
+
+function extractSha256(notes) {
+  const match = String(notes || "").match(/\bSHA256\s*:\s*([a-f0-9]{64})\b/i);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function getFileSha256(filePath) {
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest("hex").toUpperCase();
+}
+
+async function getLatestUpdateInfo() {
+  const release = await githubRequestJson(UPDATE_API_URL);
+  const currentVersion = app.getVersion();
+  const latestVersion = normalizeReleaseVersion(release.tag_name || release.name);
+  const asset = findInstallerAsset(release);
+  const available = latestVersion
+    ? compareVersions(currentVersion, latestVersion) < 0
+    : false;
+
+  return {
+    available,
+    currentVersion,
+    latestVersion,
+    releaseUrl: release.html_url || `https://github.com/${UPDATE_REPOSITORY}/releases/latest`,
+    releaseName: release.name || release.tag_name || "",
+    publishedAt: release.published_at || "",
+    notes: release.body || "",
+    assetName: asset?.name || null,
+    assetSize: asset?.size || null,
+    downloadUrl: asset?.browser_download_url || null,
+    expectedSha256: extractSha256(release.body),
+  };
+}
+
+function downloadFile(url, targetPath, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const file = fs.createWriteStream(targetPath);
+    const request = https.get(
+      url,
+      {
+        headers: {
+          "User-Agent": "PDF-Desktop-Editor-Updater",
+        },
+      },
+      (response) => {
+        const location = response.headers.location;
+        if (response.statusCode >= 300 && response.statusCode < 400 && location) {
+          file.close(() => fs.rm(targetPath, { force: true }, () => {}));
+          response.resume();
+          if (redirectCount >= 5) {
+            reject(new Error("Zu viele Weiterleitungen beim Update-Download."));
+            return;
+          }
+          downloadFile(new URL(location, url).toString(), targetPath, redirectCount + 1).then(resolve, reject);
+          return;
+        }
+
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          file.close(() => fs.rm(targetPath, { force: true }, () => {}));
+          response.resume();
+          reject(new Error(`Update-Download fehlgeschlagen: HTTP ${response.statusCode}`));
+          return;
+        }
+
+        response.pipe(file);
+        file.on("finish", () => {
+          file.close(() => resolve(targetPath));
+        });
+      },
+    );
+
+    request.setTimeout(120000, () => {
+      request.destroy(new Error("Update-Download hat zu lange gedauert."));
+    });
+    request.on("error", (error) => {
+      file.close(() => fs.rm(targetPath, { force: true }, () => {}));
+      reject(error);
+    });
+    file.on("error", (error) => {
+      request.destroy();
+      fs.rm(targetPath, { force: true }, () => {});
+      reject(error);
+    });
+  });
+}
+
+async function downloadAndInstallLatestUpdate() {
+  const updateInfo = await getLatestUpdateInfo();
+  if (!updateInfo.available) {
+    throw new Error("Es ist keine neuere Version verfuegbar.");
+  }
+  if (!updateInfo.downloadUrl) {
+    throw new Error("Im neuesten GitHub-Release wurde keine Setup-Datei gefunden.");
+  }
+
+  const safeVersion = updateInfo.latestVersion.replace(/[^0-9A-Za-z._-]/g, "_");
+  const installerPath = path.join(app.getPath("temp"), "PDF Desktop Editor", `PDF Desktop Editor Setup ${safeVersion}.exe`);
+  await downloadFile(updateInfo.downloadUrl, installerPath);
+
+  if (updateInfo.expectedSha256) {
+    const actualSha256 = getFileSha256(installerPath);
+    if (actualSha256 !== updateInfo.expectedSha256) {
+      fs.rmSync(installerPath, { force: true });
+      throw new Error("Das Update wurde heruntergeladen, aber die Pruefsumme stimmt nicht.");
+    }
+  }
+
+  const installer = spawn(installerPath, [], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: false,
+  });
+  installer.unref();
+
+  setTimeout(() => {
+    stopBackend();
+    app.quit();
+  }, 500);
+
+  return {
+    started: true,
+    installerPath,
+    latestVersion: updateInfo.latestVersion,
+  };
 }
 
 function getBackendPythonCandidates() {
@@ -235,6 +444,24 @@ function createWindow() {
 }
 
 ipcMain.handle("service:get-base-url", () => serviceBaseUrl);
+ipcMain.handle("app:get-version", () => app.getVersion());
+
+ipcMain.handle("updates:check", async () => {
+  try {
+    return await getLatestUpdateInfo();
+  } catch (error) {
+    return {
+      available: false,
+      currentVersion: app.getVersion(),
+      latestVersion: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+});
+
+ipcMain.handle("updates:install", async () => {
+  return downloadAndInstallLatestUpdate();
+});
 
 ipcMain.handle("dialog:open-pdf", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {

@@ -10,6 +10,8 @@ const state = {
   resize: null,
   lastExportPath: null,
   autoSaveTimer: null,
+  updateInfo: null,
+  updateInstalling: false,
   templateLearning: {
     active: false,
   },
@@ -59,6 +61,10 @@ const el = {
   saveDraftButton: document.getElementById("saveDraftButton"),
   exportButton: document.getElementById("exportButton"),
   revealButton: document.getElementById("revealButton"),
+  updateBanner: document.getElementById("updateBanner"),
+  updateMessage: document.getElementById("updateMessage"),
+  updateInstallButton: document.getElementById("updateInstallButton"),
+  updateDismissButton: document.getElementById("updateDismissButton"),
   status: document.getElementById("status"),
   meta: document.getElementById("meta"),
   errors: document.getElementById("errors"),
@@ -104,6 +110,78 @@ function ensureDocumentFieldCompatibility(documentModel) {
 
 function isDesktopRuntime() {
   return Boolean(window.desktopAPI?.getServiceBaseUrl);
+}
+
+function formatBytes(bytes) {
+  const numericBytes = Number(bytes) || 0;
+  if (numericBytes <= 0) {
+    return "";
+  }
+  const megabytes = numericBytes / (1024 * 1024);
+  return `${megabytes.toFixed(megabytes >= 10 ? 0 : 1)} MB`;
+}
+
+function updateUpdateBanner() {
+  if (!el.updateBanner || !el.updateMessage || !el.updateInstallButton) {
+    return;
+  }
+
+  const info = state.updateInfo;
+  const showBanner = Boolean(info?.available);
+  el.updateBanner.hidden = !showBanner;
+  if (!showBanner) {
+    el.updateMessage.textContent = "";
+    return;
+  }
+
+  const sizeText = info.assetSize ? ` (${formatBytes(info.assetSize)})` : "";
+  el.updateMessage.textContent =
+    `Update ${info.latestVersion} ist verfuegbar${sizeText}. Deine installierte Version ist ${info.currentVersion}.`;
+  el.updateInstallButton.disabled = state.updateInstalling;
+  el.updateInstallButton.textContent = state.updateInstalling
+    ? "Update wird vorbereitet..."
+    : "Jetzt installieren";
+}
+
+async function checkForAppUpdates() {
+  if (!isDesktopRuntime() || typeof window.desktopAPI?.checkForUpdates !== "function") {
+    return;
+  }
+
+  const info = await window.desktopAPI.checkForUpdates();
+  if (info?.error) {
+    console.warn("Update check failed:", info.error);
+  }
+  state.updateInfo = info;
+  updateUpdateBanner();
+}
+
+async function installAvailableUpdate() {
+  if (!state.updateInfo?.available || state.updateInstalling) {
+    return;
+  }
+  const confirmed = window.confirm(
+    "Das Update wird heruntergeladen, der Installer startet und die App schliesst sich danach. Jetzt fortfahren?",
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  state.updateInstalling = true;
+  updateUpdateBanner();
+  setStatus("Update wird heruntergeladen...");
+  try {
+    if (hasEditableDocument()) {
+      await saveDraft();
+    }
+    await window.desktopAPI.installUpdate();
+    setStatus("Update-Installer wurde gestartet.");
+  } catch (error) {
+    console.error(error);
+    state.updateInstalling = false;
+    updateUpdateBanner();
+    setStatus(error.message || "Update konnte nicht installiert werden.");
+  }
 }
 
 function resolveServiceUrl(pathOrUrl) {
@@ -1742,6 +1820,9 @@ function updateButtons() {
   el.exportButton.textContent = hasDoc ? "PDF exportieren" : "Whiteboard exportieren";
   el.revealButton.disabled = !state.lastExportPath;
   el.revealButton.hidden = !isDesktopRuntime();
+  if (el.updateInstallButton) {
+    el.updateInstallButton.disabled = state.updateInstalling;
+  }
   updateWhiteboardToolButtons();
 }
 
@@ -2535,6 +2616,9 @@ async function initialize() {
   setWhiteboardMode("pen");
   updateButtons();
   updateMeta();
+  checkForAppUpdates().catch((error) => {
+    console.warn("Update check failed:", error);
+  });
 }
 
 el.openButton.addEventListener("click", async () => {
@@ -2657,6 +2741,19 @@ el.revealButton.addEventListener("click", async () => {
   }
   await window.desktopAPI.revealFile(state.lastExportPath);
 });
+
+if (el.updateInstallButton) {
+  el.updateInstallButton.addEventListener("click", async () => {
+    await installAvailableUpdate();
+  });
+}
+
+if (el.updateDismissButton) {
+  el.updateDismissButton.addEventListener("click", () => {
+    state.updateInfo = null;
+    updateUpdateBanner();
+  });
+}
 
 el.whiteboardPenButton.addEventListener("click", () => {
   setWhiteboardMode("pen");

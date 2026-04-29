@@ -9,6 +9,7 @@ const resourcesAppRoot = path.join(outputRoot, "resources", "app");
 const backendSourceRoot = path.join(projectRoot, "backend");
 const appSourceRoot = path.join(projectRoot, "app");
 const launcherOutputPath = path.join(projectRoot, "PDF Desktop Editor.exe");
+const rootPackageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
 
 function ensureExists(targetPath, description) {
   if (!fs.existsSync(targetPath)) {
@@ -34,8 +35,8 @@ function writeAppPackageJson() {
   const appPackageJson = {
     name: "pdf-desktop-editor",
     productName: "PDF Desktop Editor",
-    version: "0.1.0",
-    description: "Local desktop PDF text editor with Electron, FastAPI, and PyMuPDF",
+    version: rootPackageJson.version,
+    description: rootPackageJson.description,
     main: "app/src/main/main.js",
   };
 
