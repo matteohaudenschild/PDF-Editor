@@ -48,6 +48,16 @@ Der Installer:
 
 Der bisherige Ordner [dist/portable-win](C:/Users/forc3/CascadeProjects/codex-workspace/pdf-desktop-editor/dist/portable-win) ist weiter fuer manuelle portable Nutzung da, aber fuer andere PCs sollte bevorzugt die `Setup.exe` verschickt werden.
 
+## App-Icon
+
+Das Windows-Icon liegt unter [app/assets/pdf-editor-icon.ico](C:/Users/forc3/CascadeProjects/codex-workspace/pdf-desktop-editor/app/assets/pdf-editor-icon.ico) und enthaelt mehrere echte Groessen fuer Taskleiste, Desktop und Explorer.
+
+Icon neu generieren:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\generate-icon.ps1
+```
+
 ## Wichtige Pfade
 
 - Electron Einstieg: [app/src/main/main.js](C:/Users/forc3/CascadeProjects/codex-workspace/pdf-desktop-editor/app/src/main/main.js)
