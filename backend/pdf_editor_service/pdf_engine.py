@@ -367,7 +367,47 @@ def _review_state_for_block(block: TextBlock) -> str:
     return "exact"
 
 
+def _is_bold_font_weight(font_weight: str | int | float | None) -> bool:
+    if font_weight is None:
+        return False
+    value = str(font_weight).strip().casefold()
+    if not value:
+        return False
+    if "bold" in value:
+        return True
+    try:
+        return float(value) >= 600
+    except ValueError:
+        return False
+
+
+def _is_contract_id_number_block(block: TextBlock) -> bool:
+    block_id = str(block.id or "").casefold()
+    group_kind = str(block.groupKind or "").casefold()
+    if "creditor-id" in block_id:
+        return False
+    text = str(block.currentText or block.originalText or "").strip()
+    return (
+        "generated-id-number" in block_id
+        or "generated-instruction-id" in block_id
+        or block_id.endswith("-id-number")
+        or group_kind == "generated-id-number-field"
+        or bool(re.fullmatch(r"200\d{7,10}", text))
+    )
+
+
+def _apply_contract_id_number_style(block: TextBlock) -> None:
+    if not _is_contract_id_number_block(block):
+        return
+    block.fontWeight = "700"
+    block.fontStyle = "normal"
+    if block.appearance is not None:
+        block.appearance.fontWeight = block.fontWeight
+        block.appearance.fontStyle = block.fontStyle
+
+
 def _sync_field_semantics(block: TextBlock, *, z_index: int = 0) -> TextBlock:
+    _apply_contract_id_number_style(block)
     block.rect = BoundingBox(
         x0=block.bbox.x0,
         y0=block.bbox.y0,
@@ -426,16 +466,199 @@ def _sync_field_semantics(block: TextBlock, *, z_index: int = 0) -> TextBlock:
             block.fontSize = min(block.fontSize, 9.2)
             block.lineHeight = round(max(block.fontSize * 1.15, field_height), 3)
             block.baseline = round(block.bbox.y0 + min(field_height - 1.1, block.fontSize * 0.88), 3)
+    if block.appearance is not None:
+        block.appearance.fontFamily = block.fontFamily
+        block.appearance.fontKey = block.fontKey
+        block.appearance.fontSize = block.fontSize
+        block.appearance.color = block.color
+        block.appearance.lineHeight = block.lineHeight
+        block.appearance.align = block.align
+        block.appearance.rotation = block.rotation
+        block.appearance.cssFontFamily = block.cssFontFamily
+        block.appearance.fontAssetId = block.fontAssetId
+        block.appearance.fontWeight = block.fontWeight
+        block.appearance.fontStyle = block.fontStyle
+        block.appearance.baseline = block.baseline
+        block.appearance.minFontSize = block.minFontSize
     return block
 
 
+def _normalize_contract_id_number_blocks(blocks: list[TextBlock]) -> None:
+    generated_id_rects: list[tuple[int, pymupdf.Rect]] = []
+    for block in blocks:
+        if not _is_contract_id_number_block(block):
+            continue
+        text = str(block.currentText or block.originalText or "").strip()
+        original_text = str(block.originalText or "").strip()
+        current_text = str(block.currentText or "").strip()
+        if re.fullmatch(r"200\d{7,10}", current_text) and re.fullmatch(r"200\d{0,3}", original_text):
+            block.sourceOriginalValue = block.sourceOriginalValue or original_text
+            block.originalText = current_text
+        block_id = str(block.id or "").casefold()
+        if (
+            re.fullmatch(r"200\d{7,10}", text)
+            or (
+                ("generated-id-number" in block_id or "generated-instruction-id" in block_id)
+                and len(text) >= 8
+            )
+        ):
+            generated_id_rects.append((
+                block.page,
+                pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1),
+            ))
+
+    for block in blocks:
+        if (
+            block.isCustom
+            or block.isCheckbox
+            or (
+                block.groupKind.startswith("generated-")
+                and block.groupKind != "generated-id-number-field"
+            )
+        ):
+            continue
+        text = str(block.currentText or block.originalText or "").strip()
+        if not re.fullmatch(r"200\d{0,3}", text):
+            continue
+        for page_number, rect in generated_id_rects:
+            if block.page != page_number:
+                continue
+            if _block_rect_overlap_ratio(block, rect, padding=2.0) >= 0.35:
+                block.currentText = ""
+                block.originalText = ""
+                block.editable = False
+                block.groupKind = "hidden-id-number-prefix"
+                break
+
+    labels_by_page: dict[int, list[TextBlock]] = {}
+    for block in blocks:
+        label_text = _normalize_text_content(block.originalText or block.currentText)
+        if "id-nr" in label_text or "id nr" in label_text:
+            labels_by_page.setdefault(block.page, []).append(block)
+
+    for page_number, labels in labels_by_page.items():
+        page_blocks = [block for block in blocks if block.page == page_number]
+        for label in labels:
+            label_center_y = (label.bbox.y0 + label.bbox.y1) / 2
+            candidates: list[TextBlock] = []
+            for block in page_blocks:
+                if block is label or block.isCustom or block.isCheckbox:
+                    continue
+                if "creditor-id" in str(block.id or "").casefold():
+                    continue
+                text = str(block.currentText or block.originalText or "").strip()
+                if not re.fullmatch(r"200\d{0,10}", text):
+                    continue
+                block_center_y = (block.bbox.y0 + block.bbox.y1) / 2
+                if abs(block_center_y - label_center_y) > max(8.0, label.lineHeight * 0.9):
+                    continue
+                if block.bbox.x0 < label.bbox.x0:
+                    continue
+                if block.bbox.x0 > label.bbox.x1 + 120.0:
+                    continue
+                candidates.append(block)
+            if not candidates:
+                continue
+            target = min(candidates, key=lambda block: (abs(block.bbox.x0 - label.bbox.x1), block.bbox.y0))
+            if not target.groupKind.startswith("generated-"):
+                target.groupKind = "generated-id-number-field"
+            _apply_contract_id_number_style(target)
+
+
+def _payment_column_center(page_blocks: list[TextBlock], suffix: str) -> Optional[float]:
+    candidates: list[TextBlock] = []
+    for block in page_blocks:
+        text = _normalize_text_content(block.originalText or block.currentText)
+        if not text:
+            continue
+        if suffix == "quarterly" and (
+            "¼" in text
+            or "1/4" in text
+            or "viertel" in text
+        ):
+            candidates.append(block)
+        elif suffix == "half-yearly" and (
+            "½" in text
+            or "1/2" in text
+            or "halb" in text
+        ):
+            candidates.append(block)
+        elif suffix == "yearly" and text in {"jährlich", "jahrlich"}:
+            candidates.append(block)
+    if not candidates:
+        return None
+    candidate = min(candidates, key=lambda block: (block.bbox.y0, block.bbox.x0))
+    return (candidate.bbox.x0 + candidate.bbox.x1) / 2
+
+
+def _normalize_payment_frequency_checkbox_blocks(blocks: list[TextBlock]) -> None:
+    blocks_by_page: dict[int, list[TextBlock]] = {}
+    for block in blocks:
+        blocks_by_page.setdefault(block.page, []).append(block)
+
+    for page_number, page_blocks in blocks_by_page.items():
+        payment_blocks = [
+            block for block in page_blocks
+            if str(block.id or "").startswith(f"page-{page_number}-generated-payment-")
+            and block.isCheckbox
+        ]
+        if not payment_blocks:
+            continue
+
+        marker = _find_page_block(page_blocks, "Gewünschte Zahlungsweise")
+        prompt = _find_page_block(page_blocks, "Bitte ankreuzen")
+        if marker is None or prompt is None:
+            continue
+
+        center_y = (prompt.bbox.y0 + prompt.bbox.y1) / 2
+        scale_x = max(0.1, (max((block.bbox.x1 for block in page_blocks), default=595.0)) / 595.0)
+        fallback_centers = {
+            "quarterly": 259.25 * scale_x,
+            "half-yearly": 362.2 * scale_x,
+            "yearly": 469.4 * scale_x,
+        }
+
+        for block in payment_blocks:
+            block_id = str(block.id or "")
+            suffix = block_id.rsplit("generated-payment-", 1)[-1]
+            if suffix not in fallback_centers:
+                block.currentText = ""
+                block.originalText = ""
+                block.editable = False
+                block.groupKind = "hidden-payment-checkbox-extra"
+                continue
+            center_x = _payment_column_center(page_blocks, suffix) or fallback_centers[suffix]
+            current_size = max(block.bbox.x1 - block.bbox.x0, block.bbox.y1 - block.bbox.y0)
+            checkbox_size = min(12.0, max(9.0, current_size or 11.0))
+            block.bbox.x0 = round(center_x - checkbox_size / 2, 3)
+            block.bbox.x1 = round(center_x + checkbox_size / 2, 3)
+            block.bbox.y0 = round(center_y - checkbox_size / 2, 3)
+            block.bbox.y1 = round(center_y + checkbox_size / 2, 3)
+            block.sourceCoverRegions = [block.bbox.model_copy(deep=True)]
+            block.quads = []
+            block.lineHeight = max(block.lineHeight, checkbox_size)
+            if suffix == "quarterly" and not block.originalText.strip():
+                block.originalText = "x"
+
+
 def _sync_fields(blocks: list[TextBlock]) -> list[TextBlock]:
+    _normalize_contract_id_number_blocks(blocks)
+    _normalize_payment_frequency_checkbox_blocks(blocks)
     visible_blocks = [
         block for block in blocks
         if not (
             block.groupKind == "widget-text-field"
             and not block.originalText.strip()
             and not block.currentText.strip()
+        )
+        and not (
+            not block.editable
+            and not block.originalText.strip()
+            and not block.currentText.strip()
+            and (
+                block.groupKind.startswith("hidden-")
+                or block.groupKind == "source-overlay-hidden"
+            )
         )
     ]
     return [_sync_field_semantics(block, z_index=index) for index, block in enumerate(visible_blocks)]
@@ -537,6 +760,22 @@ def _expanded_block_rect(block: TextBlock, page_rect: Optional[pymupdf.Rect] = N
     return rect
 
 
+def _expanded_id_number_cover_rect(block: TextBlock, page_rect: Optional[pymupdf.Rect] = None) -> pymupdf.Rect:
+    baseline = block.baseline if block.baseline is not None else block.bbox.y1
+    text = (block.currentText or block.originalText or "").strip()
+    try:
+        text_width = pymupdf.get_text_length(text, fontname="Helvetica-Bold", fontsize=block.fontSize) if text else 0.0
+    except Exception:
+        text_width = len(text) * block.fontSize * 0.55
+    top = min(block.bbox.y0, baseline - block.fontSize * 1.05) - 0.8
+    bottom = max(block.bbox.y1, baseline + block.fontSize * 0.42) + 1.2
+    x1 = max(block.bbox.x1, block.bbox.x0 + text_width + max(4.0, block.fontSize * 0.45))
+    rect = pymupdf.Rect(block.bbox.x0 - 1.0, top, x1 + 1.0, bottom)
+    if page_rect is not None:
+        rect &= page_rect
+    return rect
+
+
 def _visual_cover_rect(block: TextBlock, page_rect: Optional[pymupdf.Rect] = None) -> pymupdf.Rect:
     pad_x = max(2.0, block.fontSize * 0.45)
     trim_top = max(1.0, block.lineHeight * 0.16)
@@ -553,6 +792,8 @@ def _visual_cover_rect(block: TextBlock, page_rect: Optional[pymupdf.Rect] = Non
 
 
 def _field_cover_rects(block: TextBlock, page_rect: Optional[pymupdf.Rect] = None) -> list[pymupdf.Rect]:
+    if _is_contract_id_number_block(block):
+        return [_expanded_id_number_cover_rect(block, page_rect)]
     if block.sourceCoverRegions:
         rects: list[pymupdf.Rect] = []
         for region in block.sourceCoverRegions:
@@ -564,6 +805,33 @@ def _field_cover_rects(block: TextBlock, page_rect: Optional[pymupdf.Rect] = Non
         if rects:
             return rects
     return [_expanded_block_rect(block, page_rect)]
+
+
+def _apply_block_redactions(page: pymupdf.Page, blocks: list[TextBlock]) -> bool:
+    def apply_group(group: list[TextBlock], *, remove_line_art: bool) -> bool:
+        applied = False
+        for block in group:
+            for rect in _field_cover_rects(block, page.rect):
+                page.add_redact_annot(rect, fill=False, cross_out=False)
+                applied = True
+        if not applied:
+            return False
+        page.apply_redactions(
+            images=pymupdf.PDF_REDACT_IMAGE_NONE,
+            graphics=(
+                pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED
+                if remove_line_art
+                else pymupdf.PDF_REDACT_LINE_ART_NONE
+            ),
+            text=pymupdf.PDF_REDACT_TEXT_REMOVE,
+        )
+        return True
+
+    regular_blocks = [block for block in blocks if not _is_contract_id_number_block(block)]
+    id_blocks = [block for block in blocks if _is_contract_id_number_block(block)]
+    regular_applied = apply_group(regular_blocks, remove_line_art=False)
+    id_applied = apply_group(id_blocks, remove_line_art=True)
+    return regular_applied or id_applied
 
 
 def _bbox_union(target: list[float], other: tuple[float, float, float, float]) -> list[float]:
@@ -800,6 +1068,31 @@ def _resolve_system_font_file(font_name: str) -> Optional[Path]:
     return candidate if candidate.exists() else None
 
 
+def _styled_normalized_font_name(font_name: str, font_weight: str, font_style: str) -> str:
+    normalized = normalize_font_name(font_name or "")
+    wants_bold = _is_bold_font_weight(font_weight)
+    wants_italic = str(font_style or "").strip().casefold() in {"italic", "oblique"}
+    base = normalized
+    for suffix in ("-bolditalic", "-boldoblique", "-bold", "-italic", "-oblique"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+
+    if base in {"arial", "helvetica", "courier"}:
+        if wants_bold and wants_italic:
+            return f"{base}-bolditalic"
+        if wants_bold:
+            return f"{base}-bold"
+        if wants_italic:
+            return f"{base}-italic"
+    if base in {"times", "times-roman", "times new roman"}:
+        if wants_bold:
+            return "times-bold"
+        if wants_italic:
+            return "times-italic"
+    return normalized
+
+
 def _collect_page_font_resources(page: pymupdf.Page) -> dict[str, str]:
     resources: dict[str, str] = {}
     for _xref, _ext, _ftype, base_name, resource_name, _encoding in page.get_fonts():
@@ -815,12 +1108,11 @@ def _resolve_export_font_spec(
     runtime: Optional[FontRuntime],
     page_font_resources: dict[str, str],
 ) -> ExportFontSpec:
-    system_font_file = _resolve_system_font_file(block.fontFamily or "")
+    normalized = _styled_normalized_font_name(block.fontFamily or "", block.fontWeight or "400", block.fontStyle or "normal")
+    system_font_file = _resolve_system_font_file(normalized)
     if system_font_file is not None:
-        normalized = normalize_font_name(block.fontFamily or "fallback")
         return ExportFontSpec(name=f"sysfont-{normalized}", font_file=system_font_file)
 
-    normalized = normalize_font_name(block.fontFamily or "")
     page_font_name = page_font_resources.get(normalized)
     if page_font_name:
         return ExportFontSpec(name=page_font_name)
@@ -5075,6 +5367,7 @@ def _should_redact_background_block(block: TextBlock, page: pymupdf.Page) -> boo
         block.groupKind.startswith("generated-")
         and "scan" in block.groupKind
         and block.currentText == block.originalText
+        and not _is_contract_id_number_block(block)
     ):
         return False
     if block.groupKind.startswith("generated-") and not (block.currentText.strip() or block.originalText.strip()):
@@ -5119,13 +5412,11 @@ def _render_backgrounds(
 
     for page_number in range(1, background_doc.page_count + 1):
         page = background_doc[page_number - 1]
-        for block in blocks_by_page.get(page_number, []):
-            if not _should_redact_background_block(block, page):
-                continue
-            for rect in _field_cover_rects(block, page.rect):
-                page.add_redact_annot(rect, fill=False, cross_out=False)
-        if any(_should_redact_background_block(block, page) for block in blocks_by_page.get(page_number, [])):
-            page.apply_redactions(images=0, graphics=0, text=0)
+        redact_blocks = [
+            block for block in blocks_by_page.get(page_number, [])
+            if _should_redact_background_block(block, page)
+        ]
+        _apply_block_redactions(page, redact_blocks)
         _clear_original_checkbox_marks(
             page,
             [block for block in blocks_by_page.get(page_number, []) if block.isCheckbox],
@@ -5369,9 +5660,21 @@ def _date_with_dots(value: str) -> str:
     return f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
 
 
+def _first_complete_contract_id(*values: str) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        match = re.search(r"\b200\d{7,10}\b", text)
+        if match:
+            return match.group(0)
+    return ""
+
+
 def _combined_scan_values(scan_blocks: list[TextBlock]) -> dict[str, str]:
     scan_values = _scan_blocks_by_id(scan_blocks)
-    id_number = _scan_text_value_by_id(scan_values, "page-1-generated-id-number") or _scan_text_value_by_id(scan_values, "page-4-generated-instruction-id")
+    id_number = _first_complete_contract_id(
+        _scan_text_value_by_id(scan_values, "page-1-generated-id-number"),
+        _scan_text_value_by_id(scan_values, "page-4-generated-instruction-id"),
+    )
     name = (
         _scan_text_value_by_id(scan_values, "page-4-generated-instruction-customer")
         or _scan_text_value_by_id(scan_values, "page-1-generated-client-name")
@@ -5422,18 +5725,33 @@ def _draw_text(
     *,
     size: float = 8.0,
     bold: bool = False,
+    underline: bool = False,
     color: tuple[float, float, float] = (0, 0, 0),
 ) -> None:
     if not text:
         return
+    fontname = "hebo" if bold else "helv"
     page.insert_text(
         pymupdf.Point(x, y),
         text,
-        fontname="hebo" if bold else "helv",
+        fontname=fontname,
         fontsize=size,
         color=color,
         overlay=True,
     )
+    if underline:
+        try:
+            text_width = pymupdf.get_text_length(text, fontname=fontname, fontsize=size)
+        except Exception:
+            text_width = len(text) * size * 0.55
+        underline_y = y + max(0.9, size * 0.11)
+        page.draw_line(
+            pymupdf.Point(x, underline_y),
+            pymupdf.Point(x + text_width, underline_y),
+            color=color,
+            width=max(0.65, size * 0.075),
+            overlay=True,
+        )
 
 
 def _draw_hline(page: pymupdf.Page, y: float, x0: float = 42.0, x1: float = 552.0, width: float = 0.55) -> None:
@@ -5449,7 +5767,7 @@ def _draw_handlungs_header(page: pymupdf.Page, values: dict[str, str], page_inde
     _draw_hline(page, 96)
     if page_index == 1:
         _draw_text(page, 43, 112, "ID-Nr.:", size=9.0)
-        _draw_text(page, 78, 112, values["id"], size=9.0)
+        _draw_text(page, 78, 112, values["id"], size=9.0, bold=True, underline=True)
         _draw_text(page, 158, 112, values["name"], size=9.0)
         _draw_text(page, 476, 112, f"Stand: {values['stand']}", size=9.0)
     else:
@@ -5790,6 +6108,9 @@ def _sanitized_rotated_vt_scan_text(scan_block: TextBlock, values: dict[str, str
     if values.get("id") == "2000544780" and block_id in VT_ROTATED_2000544780_VALUE_OVERRIDES:
         return VT_ROTATED_2000544780_VALUE_OVERRIDES[block_id]
 
+    if block_id in {"page-1-generated-id-number", "page-4-generated-instruction-id"}:
+        return values["id"]
+
     if re.match(r"page-[123]-generated-client-name$", block_id):
         return values["client_name"]
     if re.match(r"page-[123]-generated-client-representative$", block_id):
@@ -5882,8 +6203,12 @@ def _clone_combined_scan_block(scan_block: TextBlock, existing_ids: set[str], va
         while f"{scan_block.id}-combined-extra-{suffix}" in existing_ids:
             suffix += 1
         clone.id = f"{scan_block.id}-combined-extra-{suffix}"
-    clone.originalText = ""
     clone.currentText = current_text
+    clone.originalText = (
+        current_text
+        if _is_contract_id_number_block(clone) and re.fullmatch(r"200\d{7,10}", current_text.strip())
+        else ""
+    )
     clone.groupKind = _normalize_cloned_scan_group_kind(clone.groupKind)
     clone.sourceType = "vector-form"
     existing_ids.add(clone.id)
@@ -5932,7 +6257,14 @@ def _apply_rotated_scan_values_to_reference_blocks(
             target_block = _find_nearest_reference_text_block(scan_block, reference_blocks, used_target_ids)
 
         if target_block is not None and target_block.id not in used_target_ids:
-            target_block.currentText = scan_block.currentText if scan_block.isCheckbox else _sanitized_rotated_vt_scan_text(scan_block, values)
+            applied_text = scan_block.currentText if scan_block.isCheckbox else _sanitized_rotated_vt_scan_text(scan_block, values)
+            target_block.currentText = applied_text
+            if (
+                (_is_contract_id_number_block(scan_block) or _is_contract_id_number_block(target_block))
+                and re.fullmatch(r"200\d{7,10}", str(applied_text or "").strip())
+            ):
+                target_block.sourceOriginalValue = target_block.sourceOriginalValue or target_block.originalText
+                target_block.originalText = applied_text
             _expand_normalized_reference_block(scan_block, target_block)
             used_target_ids.add(target_block.id)
             continue
@@ -6175,14 +6507,11 @@ def render_background_page(session: DocumentSession, page_number: int, target_wi
             raise ValueError(f"Unbekannte Seite: {page_number}")
 
         page = doc[page_number - 1]
-        for block in session.model.blocks:
-            if block.page != page_number or not _should_redact_background_block(block, page):
-                continue
-            for rect in _field_cover_rects(block, page.rect):
-                page.add_redact_annot(rect, fill=False, cross_out=False)
-
-        if any(block.page == page_number and _should_redact_background_block(block, page) for block in session.model.blocks):
-            page.apply_redactions(images=0, graphics=0, text=0)
+        redact_blocks = [
+            block for block in session.model.blocks
+            if block.page == page_number and _should_redact_background_block(block, page)
+        ]
+        _apply_block_redactions(page, redact_blocks)
         _clear_original_checkbox_marks(
             page,
             [block for block in session.model.blocks if block.page == page_number and block.isCheckbox],
@@ -6483,6 +6812,25 @@ def _ensure_page_font(
         page_font_aliases.add(font_spec.name)
 
 
+def _draw_text_underline(
+    page: pymupdf.Page,
+    *,
+    x: float,
+    baseline: float,
+    width: float,
+    fontsize: float,
+    color: tuple[float, float, float],
+) -> None:
+    underline_y = baseline + max(0.9, fontsize * 0.11)
+    page.draw_line(
+        pymupdf.Point(x, underline_y),
+        pymupdf.Point(x + width, underline_y),
+        color=color,
+        width=max(0.65, fontsize * 0.075),
+        overlay=True,
+    )
+
+
 def _write_block_text(
     page: pymupdf.Page,
     block: TextBlock,
@@ -6571,6 +6919,15 @@ def _write_block_text(
                     color=color,
                     overlay=True,
                 )
+                if _is_contract_id_number_block(block):
+                    _draw_text_underline(
+                        page,
+                        x=rect.x0,
+                        baseline=block.baseline,
+                        width=width,
+                        fontsize=fontsize,
+                        color=color,
+                    )
                 return
             fontsize = round(fontsize - 0.25, 2)
 
@@ -6681,6 +7038,15 @@ def _write_rotated_page_block_text(
                     rotate=rotate,
                     overlay=True,
                 )
+                if _is_contract_id_number_block(block):
+                    underline_y = baseline + index * line_height + max(0.9, fontsize * 0.11)
+                    page.draw_line(
+                        _rotated_visual_point(page, rect.x0, underline_y),
+                        _rotated_visual_point(page, rect.x0 + width, underline_y),
+                        color=color,
+                        width=max(0.65, fontsize * 0.075),
+                        overlay=True,
+                    )
                 break
             fontsize = round(fontsize - 0.25, 2)
 
@@ -6693,6 +7059,9 @@ def _page_looks_like_image_scan(page: pymupdf.Page) -> bool:
 
 def _scan_replacement_rect(block: TextBlock, page_rect: pymupdf.Rect) -> pymupdf.Rect:
     baseline = block.baseline if block.baseline is not None else block.bbox.y1
+    if _is_contract_id_number_block(block):
+        return _expanded_id_number_cover_rect(block, page_rect)
+
     is_header_field = block.groupKind in {
         "generated-contract-party-field",
         "generated-contract-object-line-field",
@@ -6776,6 +7145,7 @@ def _should_cover_scan_original(block: TextBlock) -> bool:
         and not block.isCheckbox
         and block.groupKind.startswith("generated-")
         and (block.currentText.strip() or block.originalText.strip())
+        and (block.currentText != block.originalText or _is_contract_id_number_block(block))
     )
 
 
@@ -6803,7 +7173,11 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
     compose_from_reference_template = session.source_path != base_pdf_path
     changed_blocks = [
         block for block in session.model.fields
-        if block.isCustom or block.currentValue != block.originalValue
+        if (
+            block.isCustom
+            or block.currentValue != block.originalValue
+            or (compose_from_reference_template and _is_contract_id_number_block(block))
+        )
     ]
     widget_pages = {
         block.page for block in session.model.fields
@@ -6854,11 +7228,7 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
                 and not _is_masked_template_block(block)
                 and (not block.isCheckbox or block.groupKind in {"generated-payment-checkbox", "widget-checkbox-field"})
             ]
-            for block in redact_blocks:
-                for rect in _field_cover_rects(block, background_page.rect):
-                    background_page.add_redact_annot(rect, fill=False, cross_out=False)
-            if redact_blocks:
-                background_page.apply_redactions(images=0, graphics=0, text=0)
+            _apply_block_redactions(background_page, redact_blocks)
             _clear_original_checkbox_marks(
                 background_page,
                 [block for block in page_changed_blocks if block.isCheckbox],

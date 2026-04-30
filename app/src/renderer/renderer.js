@@ -665,6 +665,43 @@ function isFixedGeneratedField(block) {
     && (block.groupKind.startsWith("generated-") || block.groupKind.startsWith("widget-"));
 }
 
+function isContractIdNumberBlock(block) {
+  const blockId = String(block?.id || "").toLowerCase();
+  const groupKind = String(block?.groupKind || "").toLowerCase();
+  if (blockId.includes("creditor-id")) {
+    return false;
+  }
+  const text = String(block?.currentText || block?.originalText || "").trim();
+  return blockId.includes("generated-id-number")
+    || blockId.includes("generated-instruction-id")
+    || blockId.endsWith("-id-number")
+    || groupKind === "generated-id-number-field"
+    || /^200\d{7,10}$/.test(text);
+}
+
+function syncContractIdUnderline(underline, block, scale) {
+  const text = String(block?.currentText || block?.originalText || "").trim();
+  if (!text) {
+    underline.style.display = "none";
+    return;
+  }
+
+  const boldBlock = { ...block, fontWeight: "700" };
+  const underlineWidth = Math.max(1, Math.ceil(measureTextWidth(text, boldBlock, scale)));
+  const baseline = typeof block.baseline === "number"
+    ? (block.baseline - block.bbox.y0) * scale
+    : block.fontSize * 0.88 * scale;
+  const underlineTop = baseline + Math.max(1, block.fontSize * 0.11 * scale);
+  const thickness = Math.max(1, Math.round(0.75 * scale));
+
+  underline.style.display = "block";
+  underline.style.left = "0px";
+  underline.style.top = `${underlineTop}px`;
+  underline.style.width = `${underlineWidth}px`;
+  underline.style.height = `${thickness}px`;
+  underline.style.background = block.color || "#000000";
+}
+
 function isNormalizedGeneratedDocument() {
   const templateId = String(state.document?.detectedTemplateId || "").trim().toLowerCase();
   const templateFamily = String(state.document?.detectedTemplateFamily || "").trim().toLowerCase();
@@ -700,6 +737,7 @@ function isScanFieldChanged(block) {
 
 function isUnchangedScanGeneratedTextField(block) {
   return isScanGeneratedTextField(block)
+    && !isContractIdNumberBlock(block)
     && !isScanFieldChanged(block)
     && Boolean(String(block?.currentText || "").trim());
 }
@@ -718,7 +756,7 @@ function shouldRenderScanOriginalCover(block) {
     && !block?.isCheckbox
     && typeof block?.groupKind === "string"
     && block.groupKind.startsWith("generated-")
-    && isScanFieldChanged(block)
+    && (isScanFieldChanged(block) || isContractIdNumberBlock(block))
     && Boolean(String(block.currentText || "").trim() || String(block.originalText || "").trim());
 }
 
@@ -758,6 +796,18 @@ function getScanCheckboxInnerRect(block, page) {
 
 function getScanReplacementRect(block, page) {
   const baseline = typeof block.baseline === "number" ? block.baseline : block.bbox.y1;
+  if (isContractIdNumberBlock(block)) {
+    const text = String(block.currentText || block.originalText || "").trim();
+    const textWidth = text ? measureTextWidth(text, { ...block, fontWeight: "700" }, 1) : 0;
+    const top = Math.min(block.bbox.y0, baseline - (block.fontSize * 1.05)) - 0.8;
+    const bottom = Math.max(block.bbox.y1, baseline + (block.fontSize * 0.42)) + 1.2;
+    return clampRectToPage({
+      x0: block.bbox.x0 - 1.0,
+      y0: top,
+      x1: Math.max(block.bbox.x1, block.bbox.x0 + textWidth + Math.max(4.0, block.fontSize * 0.45)) + 1.0,
+      y1: bottom,
+    }, page);
+  }
   if (isScanHeaderField(block)) {
     const scaleX = page.width / 595.0;
     const x0 = block.groupKind === "generated-contract-party-field" ? (98.5 * scaleX) : (285.6 * scaleX);
@@ -1973,6 +2023,9 @@ function renderTextLayer() {
     if (isUnchangedScanGeneratedTextField(block)) {
       node.classList.add("scan-unchanged-block");
     }
+    if (isContractIdNumberBlock(block)) {
+      node.classList.add("contract-id-number-block");
+    }
     if (block.id === state.selectedBlockId) {
       node.classList.add("selected");
     }
@@ -2318,12 +2371,19 @@ function renderTextLayer() {
       ensureEditablePlaceholder(editor);
     }
     editor.style.fontFamily = block.cssFontFamily;
-    editor.style.fontWeight = block.fontWeight || "400";
+    editor.style.fontWeight = isContractIdNumberBlock(block) ? "700" : (block.fontWeight || "400");
     editor.style.fontStyle = block.fontStyle || "normal";
     editor.style.fontSize = `${block.fontSize * scale}px`;
     editor.style.lineHeight = `${block.lineHeight * scale}px`;
     editor.style.color = block.color;
     editor.style.textAlign = block.align;
+    let contractIdUnderline = null;
+    if (isContractIdNumberBlock(block)) {
+      editor.style.textDecoration = "none";
+      contractIdUnderline = document.createElement("div");
+      contractIdUnderline.className = "contract-id-underline";
+      syncContractIdUnderline(contractIdUnderline, block, scale);
+    }
 
     editor.addEventListener("focus", () => {
       state.selectedBlockId = block.id;
@@ -2361,6 +2421,9 @@ function renderTextLayer() {
     editor.addEventListener("input", () => {
       block.currentText = readEditableText(editor);
       autoSizeTextBlock(node, editor, block, scale);
+      if (contractIdUnderline) {
+        syncContractIdUnderline(contractIdUnderline, block, scale);
+      }
       scheduleDraftSave();
     });
 
@@ -2375,6 +2438,9 @@ function renderTextLayer() {
     });
 
     node.appendChild(editor);
+    if (contractIdUnderline) {
+      node.appendChild(contractIdUnderline);
+    }
     el.textLayer.appendChild(node);
     if (block.isCustom) {
       const deleteButton = document.createElement("button");

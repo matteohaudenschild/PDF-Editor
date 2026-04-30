@@ -151,6 +151,10 @@ function buildPortable() {
   copyRecursive(path.join(backendSourceRoot, "server.py"), path.join(backendTargetRoot, "server.py"));
   copyRecursive(path.join(backendSourceRoot, "requirements.txt"), path.join(backendTargetRoot, "requirements.txt"));
   copyRecursive(path.join(backendSourceRoot, "pdf_editor_service"), path.join(backendTargetRoot, "pdf_editor_service"));
+  const tessdataSourceRoot = path.join(backendSourceRoot, "tessdata");
+  if (fs.existsSync(tessdataSourceRoot)) {
+    copyRecursive(tessdataSourceRoot, path.join(backendTargetRoot, "tessdata"));
+  }
   copyRecursive(path.join(backendSourceRoot, ".venv"), path.join(backendTargetRoot, ".venv"));
   buildRootLauncher();
 
