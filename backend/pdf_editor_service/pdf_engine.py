@@ -50,12 +50,19 @@ BASE14_FONT_MAP = {
     "arial-bolditalic": ("Helvetica-BoldOblique", "Arial, sans-serif"),
     "courier": ("Courier", '"Courier New", monospace'),
     "courier-bold": ("Courier-Bold", '"Courier New", monospace'),
+    "courier-italic": ("Courier-Oblique", '"Courier New", monospace'),
+    "courier-bolditalic": ("Courier-BoldOblique", '"Courier New", monospace'),
     "times": ("Times-Roman", '"Times New Roman", serif'),
     "times-roman": ("Times-Roman", '"Times New Roman", serif'),
     "times-bold": ("Times-Bold", '"Times New Roman", serif'),
     "times-italic": ("Times-Italic", '"Times New Roman", serif'),
+    "times-bolditalic": ("Times-BoldItalic", '"Times New Roman", serif'),
     "times-romanitalic": ("Times-Italic", '"Times New Roman", serif'),
+    "times-romanbolditalic": ("Times-BoldItalic", '"Times New Roman", serif'),
     "times new roman": ("Times-Roman", '"Times New Roman", serif'),
+    "times new roman-bold": ("Times-Bold", '"Times New Roman", serif'),
+    "times new roman-italic": ("Times-Italic", '"Times New Roman", serif'),
+    "times new roman-bolditalic": ("Times-BoldItalic", '"Times New Roman", serif'),
 }
 
 WINDOWS_FONT_FILES = {
@@ -75,8 +82,13 @@ WINDOWS_FONT_FILES = {
     "times-roman": "times.ttf",
     "times-bold": "timesbd.ttf",
     "times-italic": "timesi.ttf",
+    "times-bolditalic": "timesbi.ttf",
     "times-romanitalic": "timesi.ttf",
+    "times-romanbolditalic": "timesbi.ttf",
     "times new roman": "times.ttf",
+    "times new roman-bold": "timesbd.ttf",
+    "times new roman-italic": "timesi.ttf",
+    "times new roman-bolditalic": "timesbi.ttf",
 }
 
 WINDOWS_FONTS_DIR = Path("C:/Windows/Fonts")
@@ -87,6 +99,7 @@ EMBEDDED_SESSION_DESCRIPTION = "PDF Desktop Editor embedded edit session"
 EMBEDDED_SESSION_VERSION = 1
 BACKGROUND_RENDER_DPI = 72
 TEXT_DIRECTION_SKEW_TOLERANCE = 0.05
+TEXT_RECONSTRUCTION_BACKGROUND_MODE = True
 
 VT_TEXT_TEMPLATE_IDS = {
     "sicherheit_nord_vt_text",
@@ -260,6 +273,7 @@ class DocumentSession:
     base_pdf_path: Optional[Path] = None
     source_overlay_regions: tuple[SourceOverlayRegion, ...] = ()
     render_annotations: bool = True
+    text_only_background_pages: tuple[int, ...] = ()
 
 
 @dataclass
@@ -383,7 +397,7 @@ def _review_state_for_block(block: TextBlock) -> str:
     if source_type == "manual":
         return "review"
     if source_type == "raster-scan":
-        return "appearance-only"
+        return "review"
     if block.groupKind.startswith("generated-"):
         return "review"
     return "exact"
@@ -688,23 +702,107 @@ def _sync_fields(blocks: list[TextBlock]) -> list[TextBlock]:
 
 def normalize_font_name(font_name: str) -> str:
     cleaned = font_name.replace("_", "-").strip().lower()
+    cleaned = cleaned.lstrip("*")
     if "+" in cleaned:
         prefix, suffix = cleaned.split("+", 1)
         if len(prefix) == 6 and prefix.isalpha():
             cleaned = suffix
+    cleaned = re.sub(r"-(?:\d{3,}|[a-f0-9]{6,})$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
     aliases = {
         "arialmt": "arial",
         "arial-boldmt": "arial-bold",
         "arial-italicmt": "arial-italic",
         "arial-bolditalicmt": "arial-bolditalic",
+        "arial-bold-italic": "arial-bolditalic",
+        "arial-boldoblique": "arial-bolditalic",
         "arial,bold": "arial-bold",
         "arial,italic": "arial-italic",
         "arial,bolditalic": "arial-bolditalic",
         "helv": "helvetica",
+        "helv-bold": "helvetica-bold",
+        "helv-oblique": "helvetica-oblique",
+        "helv-boldoblique": "helvetica-boldoblique",
+        "helvetica-bolditalic": "helvetica-boldoblique",
+        "helvetica-italic": "helvetica-oblique",
+        "verdana": "arial",
+        "verdana-bold": "arial-bold",
+        "verdana-italic": "arial-italic",
+        "verdana-bolditalic": "arial-bolditalic",
+        "microsoft sans serif": "arial",
+        "microsoft sans serif-bold": "arial-bold",
+        "microsoft sans serif-italic": "arial-italic",
+        "microsoft sans serif-bolditalic": "arial-bolditalic",
+        "microsoftsansserif": "arial",
+        "microsoftsansserif-bold": "arial-bold",
+        "microsoftsansserif-italic": "arial-italic",
+        "microsoftsansserif-bolditalic": "arial-bolditalic",
+        "calibri": "arial",
+        "calibri-bold": "arial-bold",
+        "calibri-italic": "arial-italic",
+        "calibri-bolditalic": "arial-bolditalic",
         "cour": "courier",
+        "cour-bold": "courier-bold",
+        "cour-italic": "courier-italic",
+        "cour-bolditalic": "courier-bolditalic",
         "timesroman": "times-roman",
+        "timesnewroman": "times new roman",
+        "timesnewroman-bold": "times new roman-bold",
+        "timesnewroman-italic": "times new roman-italic",
+        "timesnewroman-bolditalic": "times new roman-bolditalic",
+        "timesnewromanps-boldmt": "times-bold",
+        "timesnewromanps-italicmt": "times-italic",
+        "timesnewromanps-bolditalicmt": "times-bolditalic",
+        "times new roman-boldmt": "times new roman-bold",
+        "times new roman-italicmt": "times new roman-italic",
+        "times new roman-bolditalicmt": "times new roman-bolditalic",
+        "times-bolditalic": "times-bolditalic",
+        "times-bold-italic": "times-bolditalic",
     }
-    return aliases.get(cleaned, cleaned)
+    if cleaned in aliases:
+        return aliases[cleaned]
+
+    compact = cleaned.replace(" ", "")
+    if compact in aliases:
+        return aliases[compact]
+
+    if "arial" in cleaned:
+        if "bold" in cleaned and ("italic" in cleaned or "oblique" in cleaned):
+            return "arial-bolditalic"
+        if "bold" in cleaned:
+            return "arial-bold"
+        if "italic" in cleaned or "oblique" in cleaned:
+            return "arial-italic"
+        return "arial"
+
+    if "verdana" in cleaned or "calibri" in cleaned or "microsoft sans serif" in cleaned or "microsoftsansserif" in compact:
+        if "bold" in cleaned and ("italic" in cleaned or "oblique" in cleaned):
+            return "arial-bolditalic"
+        if "bold" in cleaned:
+            return "arial-bold"
+        if "italic" in cleaned or "oblique" in cleaned:
+            return "arial-italic"
+        return "arial"
+
+    if "times" in cleaned:
+        if "bold" in cleaned and ("italic" in cleaned or "oblique" in cleaned):
+            return "times-bolditalic"
+        if "bold" in cleaned:
+            return "times-bold"
+        if "italic" in cleaned or "oblique" in cleaned:
+            return "times-italic"
+        return "times new roman" if "new roman" in cleaned else "times"
+
+    if "courier" in cleaned or cleaned.startswith("cour"):
+        if "bold" in cleaned and ("italic" in cleaned or "oblique" in cleaned):
+            return "courier-bolditalic"
+        if "bold" in cleaned:
+            return "courier-bold"
+        if "italic" in cleaned or "oblique" in cleaned:
+            return "courier-italic"
+        return "courier"
+
+    return cleaned
 
 
 def choose_css_family(font_name: str) -> str:
@@ -1108,6 +1206,8 @@ def _styled_normalized_font_name(font_name: str, font_weight: str, font_style: s
         if wants_italic:
             return f"{base}-italic"
     if base in {"times", "times-roman", "times new roman"}:
+        if wants_bold and wants_italic:
+            return "times-bolditalic"
         if wants_bold:
             return "times-bold"
         if wants_italic:
@@ -1133,7 +1233,8 @@ def _resolve_export_font_spec(
     normalized = _styled_normalized_font_name(block.fontFamily or "", block.fontWeight or "400", block.fontStyle or "normal")
     system_font_file = _resolve_system_font_file(normalized)
     if system_font_file is not None:
-        return ExportFontSpec(name=f"sysfont-{normalized}", font_file=system_font_file)
+        safe_font_name = re.sub(r"[^A-Za-z0-9_-]+", "-", normalized).strip("-") or "font"
+        return ExportFontSpec(name=f"sysfont-{safe_font_name}", font_file=system_font_file)
 
     page_font_name = page_font_resources.get(normalized)
     if page_font_name:
@@ -1555,6 +1656,8 @@ def _collect_font_runtimes(doc: pymupdf.Document, fonts_dir: Path) -> tuple[dict
             # base14 equivalents whenever we can map the family.
             if mapped:
                 pdf_font_name = mapped[0]
+            elif normalized in {"zapfdingbats", "zadi", "wingdings"}:
+                pdf_font_name = "Helvetica"
             elif font_buffer:
                 pdf_font_name = font_asset_id
             else:
@@ -1664,6 +1767,24 @@ def _merge_line_blocks_into_multiline(blocks: list[BlockFragment]) -> list[Block
     return merged
 
 
+def _page_is_visually_blank(page: pymupdf.Page) -> bool:
+    if page.get_text("text").strip() or page.get_drawings():
+        return False
+    try:
+        pixmap = page.get_pixmap(dpi=40, alpha=False)
+    except Exception:
+        return False
+    dark_pixels = 0
+    total_pixels = max(1, pixmap.width * pixmap.height)
+    samples = pixmap.samples
+    for index in range(0, len(samples), 3):
+        if samples[index] + samples[index + 1] + samples[index + 2] < 735:
+            dark_pixels += 1
+            if dark_pixels / total_pixels > 0.0005:
+                return False
+    return True
+
+
 def _extract_blocks_for_page(
     page: pymupdf.Page,
     font_runtimes_by_family: dict[str, FontRuntime],
@@ -1768,7 +1889,7 @@ def _extract_blocks_for_page(
                 )
             )
 
-    if not page_blocks:
+    if not page_blocks and not _page_is_visually_blank(page):
         warnings.append(f"Seite {page.number + 1} enthält keine editierbaren Textblöcke.")
 
     return _sync_fields(page_blocks)
@@ -4891,7 +5012,7 @@ def _classify_page(
 
     support_mode = "exact"
     if kind in {"raster-scan", "mixed"}:
-        support_mode = "appearance-only"
+        support_mode = "review"
         review_items.append(ReviewItem(
             severity="warning",
             code="scan-page",
@@ -4917,7 +5038,7 @@ def _classify_page(
     if any(block.reviewState != "exact" for block in page_blocks):
         support_mode = "review" if support_mode == "exact" else support_mode
 
-    if kind == "raster-scan" and not any(block.currentText.strip() for block in page_blocks):
+    if kind == "raster-scan" and not any(block.currentText.strip() for block in page_blocks) and not _page_is_visually_blank(page):
         warnings.append(f"Seite {page.number + 1} ist scanlastig und hat keine stabil extrahierbaren Textzeilen.")
 
     return kind, support_mode, review_items
@@ -5412,12 +5533,34 @@ def persist_draft(session: DocumentSession) -> Path:
     return session.sidecar_path
 
 
+def _render_blank_page_image(
+    width: float,
+    height: float,
+    output_path: Path,
+    *,
+    target_width: Optional[int] = None,
+) -> None:
+    blank_doc = pymupdf.open()
+    try:
+        page = blank_doc.new_page(width=width, height=height)
+        page.draw_rect(page.rect, color=None, fill=(1, 1, 1), width=0, overlay=False)
+        if target_width and target_width > 0:
+            scale = target_width / max(page.rect.width, 1.0)
+            matrix = pymupdf.Matrix(scale, scale)
+            page.get_pixmap(matrix=matrix, alpha=False).save(output_path)
+        else:
+            page.get_pixmap(dpi=BACKGROUND_RENDER_DPI, alpha=False).save(output_path)
+    finally:
+        blank_doc.close()
+
+
 def _render_backgrounds(
     source_path: Path,
     blocks: list[TextBlock],
     work_dir: Path,
     *,
     render_annotations: bool = True,
+    text_only_pages: tuple[int, ...] = (),
 ) -> dict[int, Path]:
     backgrounds_dir = work_dir / "backgrounds"
     if backgrounds_dir.exists():
@@ -5425,6 +5568,7 @@ def _render_backgrounds(
     backgrounds_dir.mkdir(parents=True, exist_ok=True)
 
     background_doc = pymupdf.open(source_path)
+    text_only_page_set = set(text_only_pages)
 
     blocks_by_page: dict[int, list[TextBlock]] = {}
     for block in blocks:
@@ -5434,6 +5578,12 @@ def _render_backgrounds(
 
     for page_number in range(1, background_doc.page_count + 1):
         page = background_doc[page_number - 1]
+        output_path = backgrounds_dir / f"page-{page_number}.png"
+        if page_number in text_only_page_set:
+            _render_blank_page_image(page.rect.width, page.rect.height, output_path)
+            output_paths[page_number] = output_path
+            continue
+
         redact_blocks = [
             block for block in blocks_by_page.get(page_number, [])
             if _should_redact_background_block(block, page)
@@ -5444,7 +5594,6 @@ def _render_backgrounds(
             [block for block in blocks_by_page.get(page_number, []) if block.isCheckbox],
         )
 
-        output_path = backgrounds_dir / f"page-{page_number}.png"
         page.get_pixmap(dpi=BACKGROUND_RENDER_DPI, alpha=False, annots=render_annotations).save(output_path)
         output_paths[page_number] = output_path
 
@@ -6395,7 +6544,7 @@ def _normalize_combined_vt_handlungsanweisung_session(
 
     warning = (
         "doc031 wurde als kombinierter VT-Vertrag mit Handlungsanweisung erkannt "
-        "und als saubere, weiße generierte PDF normalisiert. Der Originalscan dient nur als OCR-Datenquelle."
+        "und als saubere, weiße generierte PDF normalisiert. Der Originalscan wurde nur zur Texterkennung ausgewertet."
     )
     if warning not in normalized_session.model.supportStatus.warnings:
         normalized_session.model.supportStatus.warnings.append(warning)
@@ -6552,6 +6701,19 @@ def render_background_page(session: DocumentSession, page_number: int, target_wi
     cache_name = f"page-{page_number}-w{width_key or 'default'}-{state_key}.png"
     output_path = cache_dir / cache_name
     if output_path.exists():
+        return output_path
+
+    text_only_page_set = set(session.text_only_background_pages)
+    if page_number in text_only_page_set:
+        page_model = next((page for page in session.model.pages if page.pageNumber == page_number), None)
+        if page_model is None:
+            raise ValueError(f"Unbekannte Seite: {page_number}")
+        _render_blank_page_image(
+            page_model.width,
+            page_model.height,
+            output_path,
+            target_width=target_width,
+        )
         return output_path
 
     doc = pymupdf.open(_session_pdf_base_path(session))
@@ -6741,6 +6903,11 @@ def analyze_document(
             documentClass=_document_class_from_pages(pages),
         ),
     )
+    text_only_background_pages = (
+        tuple(page.pageNumber for page in model.pages)
+        if supported and TEXT_RECONSTRUCTION_BACKGROUND_MODE
+        else ()
+    )
 
     if supported and embedded_session_payload is not None:
         _restore_embedded_session(
@@ -6757,6 +6924,7 @@ def analyze_document(
             model.fields,
             work_dir,
             render_annotations=not hide_acroform_annotations,
+            text_only_pages=text_only_background_pages,
         )
         for page in model.pages:
             background_path = backgrounds.get(page.pageNumber)
@@ -6778,6 +6946,7 @@ def analyze_document(
         work_dir=work_dir,
         font_runtimes={runtime.asset.id: runtime for runtime in font_runtimes_by_family.values()},
         render_annotations=not hide_acroform_annotations,
+        text_only_background_pages=text_only_background_pages,
     )
 
 
@@ -7005,7 +7174,21 @@ def _write_block_text(
             return
         fontsize = round(fontsize - 0.25, 2)
 
-    raise ValueError(f'Text passt auch mit {block.minFontSize:.1f}pt nicht in Block "{block.id}".')
+    fallback_fontsize = block.minFontSize
+    fallback_line_height = max(block.lineHeight, fallback_fontsize * 1.15)
+    fallback_baseline = block.baseline if block.baseline is not None else rect.y0 + fallback_fontsize
+    for index, line in enumerate(block.currentText.splitlines() or [block.currentText]):
+        if not line.strip():
+            continue
+        page.insert_text(
+            pymupdf.Point(rect.x0, fallback_baseline + index * fallback_line_height),
+            line,
+            fontname=font_spec.name,
+            fontsize=fallback_fontsize,
+            color=color,
+            overlay=True,
+        )
+    return
 
 
 def _rotated_visual_point(page: pymupdf.Page, x: float, y: float) -> pymupdf.Point:
@@ -7220,6 +7403,74 @@ def _scan_checkbox_inner_rect(block: TextBlock, page_rect: pymupdf.Rect) -> pymu
     return pymupdf.Rect(rect.x0 + inset, rect.y0 + inset, rect.x1 - inset, rect.y1 - inset) & page_rect
 
 
+def _draw_line_overlays_on_page(page: pymupdf.Page, line_overlays: list[LineOverlay]) -> None:
+    for line in line_overlays:
+        try:
+            color = _hex_to_pdf_color(line.color or "#000000")
+        except Exception:
+            color = (0, 0, 0)
+        page.draw_line(
+            pymupdf.Point(line.x0, line.y0),
+            pymupdf.Point(line.x1, line.y1),
+            color=color,
+            width=max(0.1, line.width),
+            overlay=True,
+        )
+
+
+def _should_write_reconstructed_block(block: TextBlock) -> bool:
+    if block.groupKind.startswith("hidden-") or block.groupKind == "source-overlay-hidden":
+        return False
+    if not block.currentText.strip() and not block.isCheckbox:
+        return False
+    return True
+
+
+def _write_reconstructed_page(
+    output_page: pymupdf.Page,
+    session: DocumentSession,
+    page_number: int,
+) -> None:
+    output_page.draw_rect(output_page.rect, color=None, fill=(1, 1, 1), width=0, overlay=False)
+    page_model = next((page for page in session.model.pages if page.pageNumber == page_number), None)
+    if page_model is not None:
+        _draw_line_overlays_on_page(output_page, page_model.lineOverlays)
+
+    page_font_resources: dict[str, str] = {}
+    page_font_aliases: set[str] = set()
+    measurement_fonts: dict[str, pymupdf.Font] = {}
+    page_blocks = sorted(
+        (
+            block for block in session.model.fields
+            if block.page == page_number and _should_write_reconstructed_block(block)
+        ),
+        key=lambda block: (block.bbox.y0, block.bbox.x0, block.zIndex, 1 if block.isCustom else 0),
+    )
+
+    for block in page_blocks:
+        runtime = session.font_runtimes.get(block.fontAssetId or "")
+        font_spec = _resolve_export_font_spec(block, runtime, page_font_resources)
+        color = _hex_to_pdf_color(block.color)
+        if block.isCheckbox:
+            rect = pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1)
+            output_page.draw_rect(
+                rect,
+                color=color,
+                fill=None,
+                width=max(0.55, min(rect.width, rect.height) * 0.055),
+                overlay=True,
+            )
+        _write_block_text(
+            output_page,
+            block,
+            runtime,
+            font_spec,
+            color,
+            page_font_aliases,
+            measurement_fonts,
+        )
+
+
 def export_document(session: DocumentSession, target_path: Optional[Path] = None) -> Path:
     if not session.model.supportStatus.supported:
         raise ValueError("Nicht unterstütztes Dokument kann nicht exportiert werden.")
@@ -7227,6 +7478,7 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
     session.model.fields = _sync_fields(session.model.fields)
     base_pdf_path = _session_pdf_base_path(session)
     overlay_pages = {region.page_number for region in session.source_overlay_regions}
+    text_only_pages = set(session.text_only_background_pages)
     compose_from_reference_template = session.source_path != base_pdf_path
     changed_blocks = [
         block for block in session.model.fields
@@ -7236,12 +7488,17 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
             or (compose_from_reference_template and _is_contract_id_number_block(block))
         )
     ]
+    changed_block_ids = {block.id for block in changed_blocks}
+    for block in session.model.fields:
+        if block.page in text_only_pages and block.id not in changed_block_ids:
+            changed_blocks.append(block)
+            changed_block_ids.add(block.id)
+
     widget_pages = {
         block.page for block in session.model.fields
         if not session.render_annotations and block.groupKind.startswith("widget-")
     }
-    touched_pages = {block.page for block in changed_blocks} | overlay_pages | widget_pages
-    changed_block_ids = {block.id for block in changed_blocks}
+    touched_pages = {block.page for block in changed_blocks} | overlay_pages | widget_pages | text_only_pages
     changed_blocks.extend(
         block for block in session.model.fields
         if block.id not in changed_block_ids
@@ -7277,6 +7534,8 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
         if overlay_pages and session.source_path != base_pdf_path:
             overlay_source_doc = pymupdf.open(session.source_path)
         for page_number in touched_pages:
+            if page_number in text_only_pages:
+                continue
             background_page = background_doc[page_number - 1]
             page_changed_blocks = changed_blocks_by_page.get(page_number, [])
             redact_blocks = [
@@ -7295,6 +7554,11 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
         for page_index in range(source_doc.page_count):
             source_page = source_doc[page_index]
             page_number = page_index + 1
+
+            if page_number in text_only_pages:
+                output_page = output_doc.new_page(width=source_page.rect.width, height=source_page.rect.height)
+                _write_reconstructed_page(output_page, session, page_number)
+                continue
 
             if source_page.rotation:
                 output_doc.insert_pdf(source_doc, from_page=page_index, to_page=page_index)
