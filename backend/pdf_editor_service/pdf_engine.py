@@ -86,6 +86,7 @@ EMBEDDED_SESSION_FILENAME = "pdf-desktop-editor/session.json"
 EMBEDDED_SESSION_DESCRIPTION = "PDF Desktop Editor embedded edit session"
 EMBEDDED_SESSION_VERSION = 1
 BACKGROUND_RENDER_DPI = 72
+ALLOW_VT_REFERENCE_NORMALIZATION_ENV = "PDF_EDITOR_ALLOW_VT_REFERENCE_NORMALIZATION"
 
 VT_TEXT_TEMPLATE_IDS = {
     "sicherheit_nord_vt_text",
@@ -317,6 +318,10 @@ def compute_fingerprint(source_path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _allow_vt_reference_normalization() -> bool:
+    return os.getenv(ALLOW_VT_REFERENCE_NORMALIZATION_ENV, "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _bbox_to_quad(bbox: BoundingBox) -> list[float]:
@@ -6615,7 +6620,15 @@ def analyze_document(
             generated_blocks = _build_default_generated_fields(doc, page_blocks_by_page, warnings)
         blocks.extend(_sync_fields(generated_blocks))
 
-        if normalize_vt_scan_to_reference and detected_template is not None and detected_template.kind == "sicherheit_nord_vt_scan_sasse":
+        # Reference normalization swaps scan pages onto a separate VT PDF.
+        # Keep that opt-in: nearby template variants can add/remove fee rows and
+        # silently move amounts into the wrong line item.
+        if (
+            normalize_vt_scan_to_reference
+            and _allow_vt_reference_normalization()
+            and detected_template is not None
+            and detected_template.kind == "sicherheit_nord_vt_scan_sasse"
+        ):
             normalized_session = _normalize_vt_sasse_scan_session(
                 source_path=source_path,
                 fingerprint=fingerprint,
@@ -6632,6 +6645,7 @@ def analyze_document(
                 return normalized_session
         if (
             normalize_vt_scan_to_reference
+            and _allow_vt_reference_normalization()
             and detected_template is not None
             and detected_template.kind in {"sicherheit_nord_vt_handlungsanweisung_scan", "sicherheit_nord_vt_rotated_scan"}
             and doc.page_count >= 6
