@@ -86,6 +86,7 @@ EMBEDDED_SESSION_FILENAME = "pdf-desktop-editor/session.json"
 EMBEDDED_SESSION_DESCRIPTION = "PDF Desktop Editor embedded edit session"
 EMBEDDED_SESSION_VERSION = 1
 BACKGROUND_RENDER_DPI = 72
+TEXT_DIRECTION_SKEW_TOLERANCE = 0.05
 
 VT_TEXT_TEMPLATE_IDS = {
     "sicherheit_nord_vt_text",
@@ -1685,7 +1686,7 @@ def _extract_blocks_for_page(
                 continue
 
             direction = line.get("dir", (1.0, 0.0))
-            if abs(direction[0] - 1.0) > 0.01 or abs(direction[1]) > 0.01:
+            if direction[0] < 1.0 - TEXT_DIRECTION_SKEW_TOLERANCE or abs(direction[1]) > TEXT_DIRECTION_SKEW_TOLERANCE:
                 reasons.append(f"Rotierter Text auf Seite {page.number + 1}")
                 continue
 
