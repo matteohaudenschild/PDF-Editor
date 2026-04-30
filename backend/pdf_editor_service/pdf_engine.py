@@ -164,17 +164,38 @@ COMBINED_VT_HANDLUNGSANWEISUNG_TEMPLATE_FAMILY = "sicherheit_nord_vt_handlungsan
 
 VT_ROTATED_REFERENCE_BLOCK_MAP = {
     **VT_SASSE_REFERENCE_BLOCK_MAP,
-    "page-1-generated-security-drive-flat": "page-1-block-129",
-    "page-1-generated-security-onsite-30": "page-1-block-133",
-    "page-1-generated-security-guard-hour": "page-1-block-141",
-    "page-1-generated-security-guard-urgent": "page-1-block-145",
-    "page-1-generated-security-extra-checks": "page-1-block-149",
-    "page-1-generated-security-key-exchange": "page-1-block-153",
+    "page-1-generated-service-fee-base": "page-1-block-34",
+    "page-1-generated-service-fee-standleitung": "page-1-block-40",
+    "page-1-generated-service-fee-redundancy": "page-1-block-46",
+    "page-1-generated-service-fee-sim": "page-1-block-52",
+    "page-1-generated-service-fee-sharp-end": "page-1-block-58",
+    "page-1-generated-service-fee-temp-window": "page-1-block-65",
+    "page-1-generated-service-fee-unscharf": "page-1-block-71",
+    "page-1-generated-service-fee-key-storage": "page-1-block-78",
+    "page-1-generated-service-fee-sim-setup": "page-1-block-99",
+    "page-1-generated-service-fee-nsl-setup": "page-1-block-103",
+    "page-1-generated-security-drive-flat": "page-1-block-133",
+    "page-1-generated-security-onsite-30": "page-1-block-137",
+    "page-1-generated-security-guard-hour": "page-1-block-145",
+    "page-1-generated-security-guard-urgent": "page-1-block-149",
+    "page-1-generated-security-extra-checks": "page-1-block-153",
     "page-3-generated-sn-place-date": "page-3-generated-place-date",
     "page-3-generated-ag-place-date": "page-3-generated-place-date",
     "page-3-generated-payment-quarterly": "page-3-generated-payment-quarterly",
     "page-3-generated-payment-half-yearly": "page-3-generated-payment-half-yearly",
     "page-3-generated-payment-yearly": "page-3-generated-payment-yearly",
+}
+
+VT_ROTATED_REFERENCE_SYNTHETIC_VALUE_RECTS = {
+    "page-1-generated-service-fee-total": (1, (511.5, 468.255, 561.689, 479.251)),
+}
+
+VT_ROTATED_REFERENCE_ONLY_VALUE_BLOCK_IDS = {
+    "page-1-block-84",
+}
+
+VT_ROTATED_UNMAPPED_SOURCE_VALUE_IDS = {
+    "page-1-generated-security-key-exchange",
 }
 
 VT_REFERENCE_LABEL_TEXTS = {"netto", "brutto", "für", "fÃ¼r", "die"}
@@ -6215,6 +6236,24 @@ def _clone_combined_scan_block(scan_block: TextBlock, existing_ids: set[str], va
     return clone
 
 
+def _position_combined_scan_clone(
+    clone: TextBlock,
+    page_number: int,
+    rect: tuple[float, float, float, float],
+) -> None:
+    previous_y0 = clone.bbox.y0
+    x0, y0, x1, y1 = rect
+    clone.page = page_number
+    clone.bbox = BoundingBox(x0=x0, y0=y0, x1=x1, y1=y1)
+    clone.rect = clone.bbox.model_copy(deep=True)
+    clone.sourceCoverRegions = [clone.bbox.model_copy(deep=True)]
+    clone.quads = []
+    if clone.baseline is not None:
+        clone.baseline = round(y0 + (clone.baseline - previous_y0), 3)
+    else:
+        clone.baseline = round(y0 + min((y1 - y0) - 1.1, clone.fontSize * 0.88), 3)
+
+
 def _apply_rotated_scan_values_to_reference_blocks(
     *,
     scan_blocks: list[TextBlock],
@@ -6226,7 +6265,24 @@ def _apply_rotated_scan_values_to_reference_blocks(
     used_target_ids: set[str] = set()
     extra_blocks: list[TextBlock] = []
 
+    for block_id in VT_ROTATED_REFERENCE_ONLY_VALUE_BLOCK_IDS:
+        reference_block = reference_blocks_by_id.get(block_id)
+        if reference_block is not None:
+            reference_block.currentText = ""
+
     for scan_block in scan_blocks:
+        if scan_block.id in VT_ROTATED_UNMAPPED_SOURCE_VALUE_IDS:
+            continue
+
+        synthetic_value_rect = VT_ROTATED_REFERENCE_SYNTHETIC_VALUE_RECTS.get(scan_block.id)
+        if synthetic_value_rect is not None:
+            clone = _clone_combined_scan_block(scan_block, existing_ids, values)
+            if clone is not None:
+                page_number, rect = synthetic_value_rect
+                _position_combined_scan_clone(clone, page_number, rect)
+                extra_blocks.append(clone)
+            continue
+
         target_block: Optional[TextBlock] = None
 
         target_id = VT_ROTATED_REFERENCE_BLOCK_MAP.get(scan_block.id)
