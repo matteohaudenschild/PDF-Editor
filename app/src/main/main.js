@@ -14,6 +14,7 @@ const APP_DISPLAY_NAME = "PDF Editor";
 const UPDATE_REPOSITORY = "matteohaudenschild/PDF-Editor";
 const UPDATE_ASSET_NAME = `${APP_DISPLAY_NAME} Setup.exe`;
 const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
+const UPDATE_TEMP_DIR_NAMES = [APP_DISPLAY_NAME, "PDF Desktop Editor"];
 
 app.setName(APP_DISPLAY_NAME);
 
@@ -67,6 +68,41 @@ function getBackendRoot() {
 
 function getAppIconPath() {
   return path.join(getProjectRoot(), "app", "assets", "pdf-editor-old.ico");
+}
+
+function isManagedUpdateTempFile(fileName) {
+  const lowerName = String(fileName || "").toLowerCase();
+  const setupNames = ["pdf editor setup", "pdf desktop editor setup"];
+  return setupNames.some((setupName) => lowerName === `${setupName}.exe`
+    || lowerName.startsWith(`${setupName} `))
+    && (lowerName.endsWith(".exe") || lowerName.endsWith(".exe.download"));
+}
+
+function cleanupUpdateTempFiles({ keepPath = null } = {}) {
+  const normalizedKeepPath = keepPath ? path.resolve(keepPath).toLowerCase() : null;
+  for (const dirName of UPDATE_TEMP_DIR_NAMES) {
+    const updateTempDir = path.join(app.getPath("temp"), dirName);
+    try {
+      if (!fs.existsSync(updateTempDir)) {
+        continue;
+      }
+      for (const entry of fs.readdirSync(updateTempDir, { withFileTypes: true })) {
+        if (!entry.isFile() || !isManagedUpdateTempFile(entry.name)) {
+          continue;
+        }
+        const filePath = path.join(updateTempDir, entry.name);
+        if (normalizedKeepPath && path.resolve(filePath).toLowerCase() === normalizedKeepPath) {
+          continue;
+        }
+        fs.rmSync(filePath, { force: true });
+      }
+      if (fs.readdirSync(updateTempDir).length === 0) {
+        fs.rmdirSync(updateTempDir);
+      }
+    } catch (error) {
+      console.warn(`Update-Temp-Aufraeumen fehlgeschlagen: ${error.message}`);
+    }
+  }
 }
 
 function normalizeReleaseVersion(value) {
@@ -261,6 +297,7 @@ async function downloadAndInstallLatestUpdate() {
 
   const safeVersion = updateInfo.latestVersion.replace(/[^0-9A-Za-z._-]/g, "_");
   const installerPath = path.join(app.getPath("temp"), APP_DISPLAY_NAME, `${APP_DISPLAY_NAME} Setup ${safeVersion}.exe`);
+  cleanupUpdateTempFiles({ keepPath: installerPath });
   await downloadFile(updateInfo.downloadUrl, installerPath);
 
   if (updateInfo.expectedSha256) {
@@ -544,6 +581,7 @@ ipcMain.handle("shell:reveal-file", async (_event, targetPath) => {
 app.whenReady().then(async () => {
   try {
     Menu.setApplicationMenu(null);
+    cleanupUpdateTempFiles();
     await startBackend();
     createWindow();
 

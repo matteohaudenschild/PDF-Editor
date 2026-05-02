@@ -316,6 +316,7 @@ internal sealed class InstallerForm : Form
             if (_autoUpdate)
             {
                 await WaitForPreviousAppAsync();
+                CleanupUpdateTempFiles(GetCurrentInstallerPath());
             }
 
             await InstallAsync(installDir);
@@ -323,7 +324,9 @@ internal sealed class InstallerForm : Form
 
             if (_autoUpdate)
             {
+                CleanupUpdateTempFiles(GetCurrentInstallerPath());
                 LaunchApp(installDir);
+                ScheduleCurrentInstallerDelete();
                 Close();
                 return;
             }
@@ -390,6 +393,114 @@ internal sealed class InstallerForm : Form
         catch
         {
             System.Threading.Thread.Sleep(600);
+        }
+    }
+
+    private static string GetCurrentInstallerPath()
+    {
+        try
+        {
+            return Application.ExecutablePath;
+        }
+        catch
+        {
+            return Assembly.GetExecutingAssembly().Location;
+        }
+    }
+
+    private static bool IsManagedUpdateTempFile(string fileName)
+    {
+        var lowerName = (fileName ?? string.Empty).ToLowerInvariant();
+        var isSetupName = lowerName == "pdf editor setup.exe"
+            || lowerName == "pdf desktop editor setup.exe"
+            || lowerName.StartsWith("pdf editor setup ")
+            || lowerName.StartsWith("pdf desktop editor setup ");
+        return isSetupName && (lowerName.EndsWith(".exe") || lowerName.EndsWith(".exe.download"));
+    }
+
+    private static void CleanupUpdateTempFiles(string keepPath)
+    {
+        var normalizedKeepPath = string.IsNullOrWhiteSpace(keepPath)
+            ? string.Empty
+            : Path.GetFullPath(keepPath);
+        var updateTempDirs = new[]
+        {
+            Path.Combine(Path.GetTempPath(), AppName),
+            Path.Combine(Path.GetTempPath(), "PDF Desktop Editor"),
+        };
+
+        foreach (var updateTempDir in updateTempDirs)
+        {
+            try
+            {
+                if (!Directory.Exists(updateTempDir))
+                {
+                    continue;
+                }
+
+                foreach (var filePath in Directory.GetFiles(updateTempDir))
+                {
+                    if (!IsManagedUpdateTempFile(Path.GetFileName(filePath)))
+                    {
+                        continue;
+                    }
+                    if (!string.IsNullOrEmpty(normalizedKeepPath)
+                        && string.Equals(Path.GetFullPath(filePath), normalizedKeepPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    TryDeleteFile(filePath);
+                }
+
+                if (Directory.GetFileSystemEntries(updateTempDir).Length == 0)
+                {
+                    Directory.Delete(updateTempDir);
+                }
+            }
+            catch
+            {
+                // Update-Temp-Aufraeumen ist best effort.
+            }
+        }
+    }
+
+    private static void TryDeleteFile(string filePath)
+    {
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+        catch
+        {
+            // Best effort.
+        }
+    }
+
+    private void ScheduleCurrentInstallerDelete()
+    {
+        var selfPath = GetCurrentInstallerPath();
+        if (!_autoUpdate || string.IsNullOrWhiteSpace(selfPath) || !File.Exists(selfPath))
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = "/C ping 127.0.0.1 -n 3 > nul & del /F /Q \\"" + selfPath + "\\"",
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+        }
+        catch
+        {
+            // Best effort.
         }
     }
 
