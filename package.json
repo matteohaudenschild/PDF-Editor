@@ -1,6 +1,6 @@
 {
   "name": "pdf-desktop-editor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local desktop PDF text editor with Electron, FastAPI, and PyMuPDF",
   "main": "app/src/main/main.js",
   "scripts": {
