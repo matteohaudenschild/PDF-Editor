@@ -69,6 +69,7 @@ class FieldAppearance(BaseModel):
     fontAssetId: Optional[str] = None
     fontWeight: str = "400"
     fontStyle: str = "normal"
+    textDecoration: str = "none"
     baseline: Optional[float] = None
     minFontSize: float = 6.0
 
@@ -126,6 +127,7 @@ class EditableField(BaseModel):
     fontAssetId: Optional[str] = None
     fontWeight: str = "400"
     fontStyle: str = "normal"
+    textDecoration: str = "none"
     baseline: Optional[float] = None
     isCheckbox: bool = False
     isCustom: bool = False
@@ -162,6 +164,7 @@ class EditableField(BaseModel):
                 fontAssetId=self.fontAssetId,
                 fontWeight=self.fontWeight,
                 fontStyle=self.fontStyle,
+                textDecoration=self.textDecoration,
                 baseline=self.baseline,
                 minFontSize=self.minFontSize,
             )
@@ -177,6 +180,7 @@ class EditableField(BaseModel):
             self.fontAssetId = self.appearance.fontAssetId
             self.fontWeight = self.appearance.fontWeight
             self.fontStyle = self.appearance.fontStyle
+            self.textDecoration = self.appearance.textDecoration
             self.baseline = self.appearance.baseline
             self.minFontSize = self.appearance.minFontSize
 

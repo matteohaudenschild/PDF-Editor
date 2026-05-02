@@ -12,15 +12,18 @@ const {
 const projectRoot = path.resolve(__dirname, "..");
 const distRoot = path.join(projectRoot, "dist");
 const portableRoot = path.join(distRoot, "portable-win");
-const rootLauncherPath = path.join(projectRoot, "PDF Desktop Editor.exe");
+const appDisplayName = "PDF Editor";
+const appExecutableName = `${appDisplayName}.exe`;
+const installerFileName = `${appDisplayName} Setup.exe`;
+const rootLauncherPath = path.join(projectRoot, appExecutableName);
 const installerPayloadRoot = path.join(distRoot, "installer-payload");
 const installerPayloadZip = path.join(distRoot, "pdf-desktop-editor-setup-payload.zip");
-const installerOutputPath = path.join(distRoot, "PDF Desktop Editor Setup.exe");
+const installerOutputPath = path.join(distRoot, installerFileName);
 const installerResourceName = "PdfDesktopEditorPayload.zip";
 const pythonEmbedUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip";
 const pythonEmbedZip = path.join(distRoot, "python-3.12.10-embed-amd64.zip");
 const laptopCopyRoot = path.join(distRoot, "ZUM_LAPTOP_KOPIEREN");
-const laptopCopyInstallerPath = path.join(laptopCopyRoot, "PDF Desktop Editor Setup.exe");
+const laptopCopyInstallerPath = path.join(laptopCopyRoot, installerFileName);
 const laptopCopyInstructionsPath = path.join(laptopCopyRoot, "INSTALLATION.txt");
 const laptopCopyZip = path.join(distRoot, "ZUM_LAPTOP_KOPIEREN.zip");
 
@@ -144,7 +147,7 @@ function stageInstallerPayload() {
   fs.rmSync(installerPayloadRoot, { recursive: true, force: true });
   fs.mkdirSync(installerPayloadRoot, { recursive: true });
 
-  copyRecursive(rootLauncherPath, path.join(installerPayloadRoot, "PDF Desktop Editor.exe"));
+  copyRecursive(rootLauncherPath, path.join(installerPayloadRoot, appExecutableName));
   copyRecursive(portableRoot, path.join(installerPayloadRoot, "dist", "portable-win"));
 }
 
@@ -192,7 +195,8 @@ internal static class Program
 
 internal sealed class InstallerForm : Form
 {
-    private const string AppName = "PDF Desktop Editor";
+    private const string AppName = "${appDisplayName}";
+    private const string AppExecutableName = "${appExecutableName}";
     private const string PythonEmbedUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip";
     private const string PayloadResourceName = "${installerResourceName}";
 
@@ -506,7 +510,7 @@ internal sealed class InstallerForm : Form
 
     private static void LaunchApp(string installDir)
     {
-        var launcherPath = Path.Combine(installDir, "PDF Desktop Editor.exe");
+        var launcherPath = Path.Combine(installDir, AppExecutableName);
         if (!File.Exists(launcherPath))
         {
             throw new FileNotFoundException("Die installierte App wurde nicht gefunden.", launcherPath);
@@ -522,7 +526,7 @@ internal sealed class InstallerForm : Form
 
     private static void CreateDesktopShortcut(string installDir)
     {
-        var launcherPath = Path.Combine(installDir, "PDF Desktop Editor.exe");
+        var launcherPath = Path.Combine(installDir, AppExecutableName);
         if (!File.Exists(launcherPath))
         {
             throw new FileNotFoundException("Die installierte App wurde nicht gefunden.", launcherPath);
@@ -609,7 +613,7 @@ function buildInstallerExe(sourcePath) {
     throw new Error("Kein C#-Compiler gefunden. Der Setup-Installer konnte nicht gebaut werden.");
   }
 
-  const iconPath = path.join(projectRoot, "app", "assets", "pdf-editor-icon.ico");
+  const iconPath = path.join(projectRoot, "app", "assets", "pdf-editor-old.ico");
   run(
     compilerPath,
     [
@@ -635,17 +639,17 @@ function refreshLaptopCopyFolder() {
   fs.writeFileSync(
     laptopCopyInstructionsPath,
     [
-      "PDF Desktop Editor auf einem anderen Laptop installieren",
+      `${appDisplayName} auf einem anderen Laptop installieren`,
       "",
       "1. Diese Datei auf den Laptop kopieren:",
-      "   PDF Desktop Editor Setup.exe",
+      `   ${installerFileName}`,
       "",
       "2. Auf dem Laptop doppelklicken und die Installation bestaetigen.",
       "   Der Installer legt die App hier ab:",
-      "   %LOCALAPPDATA%\\Programs\\PDF Desktop Editor",
+      `   %LOCALAPPDATA%\\Programs\\${appDisplayName}`,
       "",
       "3. Danach erscheint auf dem Desktop eine Verknuepfung:",
-      "   PDF Desktop Editor",
+      `   ${appDisplayName}`,
       "",
       "4. Der Laptop braucht normalerweise kein Internet mehr fuer die Installation.",
       "   Die offizielle eingebettete Python-Laufzeit ist im Installer enthalten.",

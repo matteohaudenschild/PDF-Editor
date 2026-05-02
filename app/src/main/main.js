@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const net = require("net");
 const https = require("https");
@@ -10,9 +10,36 @@ let mainWindow = null;
 let backendProcess = null;
 let serviceBaseUrl = null;
 
+const APP_DISPLAY_NAME = "PDF Editor";
 const UPDATE_REPOSITORY = "matteohaudenschild/PDF-Editor";
-const UPDATE_ASSET_NAME = "PDF Desktop Editor Setup.exe";
+const UPDATE_ASSET_NAME = `${APP_DISPLAY_NAME} Setup.exe`;
 const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
+
+app.setName(APP_DISPLAY_NAME);
+
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.sicherheitnord.pdf-editor");
+}
+
+function removeNativeWindowMenu(browserWindow) {
+  if (!browserWindow) {
+    return;
+  }
+  Menu.setApplicationMenu(null);
+  if (typeof browserWindow.removeMenu === "function") {
+    browserWindow.removeMenu();
+  }
+  browserWindow.setMenu(null);
+  browserWindow.setAutoHideMenuBar(true);
+  browserWindow.setMenuBarVisibility(false);
+}
+
+app.on("browser-window-created", (_event, browserWindow) => {
+  removeNativeWindowMenu(browserWindow);
+  browserWindow.once("ready-to-show", () => {
+    removeNativeWindowMenu(browserWindow);
+  });
+});
 
 function getProjectRoot() {
   if (app.isPackaged) {
@@ -39,7 +66,7 @@ function getBackendRoot() {
 }
 
 function getAppIconPath() {
-  return path.join(getProjectRoot(), "app", "assets", "pdf-editor-icon.ico");
+  return path.join(getProjectRoot(), "app", "assets", "pdf-editor-old.ico");
 }
 
 function normalizeReleaseVersion(value) {
@@ -70,7 +97,7 @@ function githubRequestBuffer(url, redirectCount = 0) {
       {
         headers: {
           "Accept": "application/vnd.github+json",
-          "User-Agent": "PDF-Desktop-Editor-Updater",
+          "User-Agent": "PDF-Editor-Updater",
           "X-GitHub-Api-Version": "2022-11-28",
         },
       },
@@ -160,7 +187,7 @@ function downloadFile(url, targetPath, redirectCount = 0) {
       url,
       {
         headers: {
-          "User-Agent": "PDF-Desktop-Editor-Updater",
+          "User-Agent": "PDF-Editor-Updater",
         },
       },
       (response) => {
@@ -215,7 +242,7 @@ async function downloadAndInstallLatestUpdate() {
   }
 
   const safeVersion = updateInfo.latestVersion.replace(/[^0-9A-Za-z._-]/g, "_");
-  const installerPath = path.join(app.getPath("temp"), "PDF Desktop Editor", `PDF Desktop Editor Setup ${safeVersion}.exe`);
+  const installerPath = path.join(app.getPath("temp"), APP_DISPLAY_NAME, `${APP_DISPLAY_NAME} Setup ${safeVersion}.exe`);
   await downloadFile(updateInfo.downloadUrl, installerPath);
 
   if (updateInfo.expectedSha256) {
@@ -430,9 +457,11 @@ function stopBackend() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
+    title: APP_DISPLAY_NAME,
     width: 1400,
     height: 960,
     icon: getAppIconPath(),
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -440,6 +469,7 @@ function createWindow() {
     },
   });
 
+  removeNativeWindowMenu(mainWindow);
   mainWindow.loadFile(path.join(getProjectRoot(), "app", "src", "renderer", "index.html"));
 }
 
@@ -495,6 +525,7 @@ ipcMain.handle("shell:reveal-file", async (_event, targetPath) => {
 
 app.whenReady().then(async () => {
   try {
+    Menu.setApplicationMenu(null);
     await startBackend();
     createWindow();
 

@@ -99,7 +99,8 @@ EMBEDDED_SESSION_DESCRIPTION = "PDF Desktop Editor embedded edit session"
 EMBEDDED_SESSION_VERSION = 1
 BACKGROUND_RENDER_DPI = 72
 TEXT_DIRECTION_SKEW_TOLERANCE = 0.05
-TEXT_RECONSTRUCTION_BACKGROUND_MODE = True
+TEXT_RECONSTRUCTION_BACKGROUND_MODE = False
+MANUAL_IMAGE_OVERLAY_MODE = True
 
 VT_TEXT_TEMPLATE_IDS = {
     "sicherheit_nord_vt_text",
@@ -514,6 +515,7 @@ def _sync_field_semantics(block: TextBlock, *, z_index: int = 0) -> TextBlock:
         block.appearance.fontAssetId = block.fontAssetId
         block.appearance.fontWeight = block.fontWeight
         block.appearance.fontStyle = block.fontStyle
+        block.appearance.textDecoration = block.textDecoration
         block.appearance.baseline = block.baseline
         block.appearance.minFontSize = block.minFontSize
     return block
@@ -6755,6 +6757,86 @@ def render_background_page(session: DocumentSession, page_number: int, target_wi
         doc.close()
 
 
+def _build_manual_image_overlay_session(
+    *,
+    doc: pymupdf.Document,
+    source_path: Path,
+    fingerprint: str,
+    sidecar_path: Path,
+    work_dir: Path,
+    font_runtimes_by_family: dict[str, FontRuntime],
+    embedded_session_payload: Optional[dict],
+    current_page_hashes: list[str],
+    warnings: list[str],
+) -> DocumentSession:
+    pages = [
+        PageModel(
+            pageNumber=page.number + 1,
+            width=page.rect.width,
+            height=page.rect.height,
+            kind="manual-image-overlay",
+            supportMode="manual-overlay",
+            imageHash=current_page_hashes[page.number] if page.number < len(current_page_hashes) else None,
+        )
+        for page in doc
+    ]
+    model = DocumentModel(
+        id=uuid4().hex,
+        sourcePath=str(source_path),
+        fingerprint=fingerprint,
+        pageCount=doc.page_count,
+        documentClass="manual-image-overlay",
+        embeddedSessionFound=False,
+        sessionSchemaVersion=EMBEDDED_SESSION_VERSION,
+        pages=pages,
+        fields=[],
+        fonts=[],
+        supportStatus=SupportStatus(
+            supported=True,
+            warnings=[
+                *warnings,
+                "Manueller Bildmodus: Die Originalseiten bleiben als Hintergrund erhalten; Änderungen werden als weiße Overlay-Felder exportiert.",
+            ],
+            supportMode="manual-overlay",
+            documentClass="manual-image-overlay",
+        ),
+    )
+
+    if embedded_session_payload is not None:
+        _restore_embedded_session(model, embedded_session_payload, current_page_hashes=current_page_hashes)
+        model.documentClass = "manual-image-overlay"
+        model.supportStatus.supportMode = "manual-overlay"
+        model.supportStatus.documentClass = "manual-image-overlay"
+        model.fields = _sync_fields([
+            field for field in model.fields
+            if field.isCustom and str(field.groupKind or "").startswith("manual-")
+        ])
+
+    backgrounds = _render_backgrounds(
+        source_path,
+        [],
+        work_dir,
+        render_annotations=True,
+        text_only_pages=(),
+    )
+    for page in model.pages:
+        background_path = backgrounds.get(page.pageNumber)
+        if background_path:
+            page.backgroundImagePath = str(background_path)
+    model.reviewItems = [item for page in model.pages for item in page.reviewItems]
+    model.supportReport = _build_support_report(model)
+
+    return DocumentSession(
+        model=model,
+        sidecar_path=sidecar_path,
+        source_path=source_path,
+        work_dir=work_dir,
+        font_runtimes={runtime.asset.id: runtime for runtime in font_runtimes_by_family.values()},
+        render_annotations=True,
+        text_only_background_pages=(),
+    )
+
+
 def analyze_document(
     source_path: Path,
     runtime_root: Path,
@@ -6795,6 +6877,21 @@ def analyze_document(
     page_blocks_by_page: dict[int, list[TextBlock]] = {}
     detected_template: Optional[DocumentTemplateSpec] = None
     current_page_hashes = _page_hashes(doc)
+    if MANUAL_IMAGE_OVERLAY_MODE and not reasons:
+        session = _build_manual_image_overlay_session(
+            doc=doc,
+            source_path=source_path,
+            fingerprint=fingerprint,
+            sidecar_path=sidecar_path,
+            work_dir=work_dir,
+            font_runtimes_by_family=font_runtimes_by_family,
+            embedded_session_payload=embedded_session_payload,
+            current_page_hashes=current_page_hashes,
+            warnings=warnings,
+        )
+        doc.close()
+        return session
+
     if not reasons:
         for page_index, page in enumerate(doc):
             page_blocks = _extract_blocks_for_page(page, font_runtimes_by_family, warnings, reasons)
@@ -7046,15 +7143,198 @@ def _draw_text_underline(
     width: float,
     fontsize: float,
     color: tuple[float, float, float],
+    bold: bool = False,
+    morph: Optional[tuple[pymupdf.Point, pymupdf.Matrix]] = None,
 ) -> None:
     underline_y = baseline + max(0.9, fontsize * 0.11)
+    stroke_width = max(0.65, fontsize * 0.075)
+    if bold:
+        stroke_width = max(1.2, stroke_width * 1.75)
     page.draw_line(
         pymupdf.Point(x, underline_y),
         pymupdf.Point(x + width, underline_y),
         color=color,
-        width=max(0.65, fontsize * 0.075),
+        width=stroke_width,
         overlay=True,
+        morph=morph,
     )
+
+
+def _block_wants_underline(block: TextBlock) -> bool:
+    return (
+        str(getattr(block, "textDecoration", "") or "").strip().casefold() == "underline"
+        or _is_contract_id_number_block(block)
+    )
+
+
+def _draw_block_text_underlines(
+    page: pymupdf.Page,
+    block: TextBlock,
+    rect: pymupdf.Rect,
+    fontsize: float,
+    color: tuple[float, float, float],
+    runtime: Optional[FontRuntime],
+    font_spec: ExportFontSpec,
+    measurement_fonts: dict[str, pymupdf.Font],
+    *,
+    baseline: Optional[float] = None,
+    line_height: Optional[float] = None,
+    morph: Optional[tuple[pymupdf.Point, pymupdf.Matrix]] = None,
+) -> None:
+    if not _block_wants_underline(block):
+        return
+    lines = block.currentText.splitlines() or [block.currentText]
+    current_baseline = baseline if baseline is not None else (block.baseline if block.baseline is not None else rect.y0 + fontsize)
+    current_line_height = line_height if line_height is not None else max(block.lineHeight, fontsize * 1.15)
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        width = _measure_text_width(line, fontsize, runtime, font_spec, measurement_fonts)
+        _draw_text_underline(
+            page,
+            x=rect.x0,
+            baseline=current_baseline + index * current_line_height,
+            width=width,
+            fontsize=fontsize,
+            color=color,
+            bold=_is_bold_font_weight(block.fontWeight),
+            morph=morph,
+        )
+
+
+def _is_manual_overlay_session(session: DocumentSession) -> bool:
+    return MANUAL_IMAGE_OVERLAY_MODE and session.model.documentClass == "manual-image-overlay"
+
+
+def _is_manual_overlay_block(block: TextBlock) -> bool:
+    return block.isCustom and str(block.groupKind or "").startswith("manual-")
+
+
+def _is_manual_text_block(block: TextBlock) -> bool:
+    return _is_manual_overlay_block(block) and str(block.groupKind or "") == "manual-text"
+
+
+def _manual_text_descender_padding(font_size: float) -> float:
+    return max(1.0, font_size * 0.32)
+
+
+def _manual_text_baseline_for_export(block: TextBlock, rect: pymupdf.Rect) -> float:
+    font_size = max(float(block.fontSize or 0.0), 1.0)
+    baseline = float(block.baseline) if block.baseline is not None else rect.y0 + font_size * 0.74
+    if not _is_manual_text_block(block):
+        return baseline
+
+    min_baseline = rect.y0 + min(rect.height, max(1.0, font_size * 0.5))
+    max_baseline = rect.y1 - _manual_text_descender_padding(font_size)
+    if max_baseline < rect.y0 + 1.0:
+        max_baseline = rect.y0 + max(0.5, rect.height * 0.75)
+    lower = min(min_baseline, max_baseline)
+    upper = max(min_baseline, max_baseline)
+    return min(max(baseline, lower), upper)
+
+
+def _manual_block_morph(block: TextBlock) -> Optional[tuple[pymupdf.Point, pymupdf.Matrix]]:
+    rotation = float(block.rotation or 0.0)
+    if abs(rotation) < 0.01 or block.bbox is None:
+        return None
+    rect = pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1)
+    center = pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+    return center, pymupdf.Matrix(1, 1).prerotate(rotation)
+
+
+def _manual_overlay_cover_rect(block: TextBlock, page_rect: pymupdf.Rect) -> pymupdf.Rect:
+    rect = pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1)
+    if str(block.groupKind or "") != "manual-text":
+        return rect & page_rect
+
+    font_size = max(float(block.fontSize or 0.0), 1.0)
+    line_height = max(float(block.lineHeight or 0.0), font_size * 1.05)
+    baseline = _manual_text_baseline_for_export(block, rect)
+    lines = (block.currentText or "").splitlines() or [block.currentText or ""]
+    text_top = baseline - max(font_size * 0.98, line_height * 0.9)
+    text_bottom = baseline + (max(1, len(lines)) - 1) * line_height + max(font_size * 0.36, line_height * 0.22)
+    pad_x = max(0.65, font_size * 0.1)
+    pad_y = max(0.65, font_size * 0.08)
+    rect.x0 -= pad_x
+    rect.x1 += pad_x
+    rect.y0 = min(rect.y0, text_top - pad_y)
+    rect.y1 = max(rect.y1, text_bottom + pad_y)
+    return rect & page_rect
+
+
+def _draw_manual_overlay_cover(page: pymupdf.Page, block: TextBlock) -> None:
+    if block.bbox is None:
+        return
+    if str(block.groupKind or "") == "manual-text" and not (block.currentText or "").strip():
+        return
+    rect = _manual_overlay_cover_rect(block, page.rect)
+    if rect.is_empty:
+        return
+    if page.rotation:
+        _cover_rotated_visual_rect(page, rect)
+        if block.isCheckbox and block.currentText.strip():
+            inset = max(1.0, min(rect.width, rect.height) * 0.16)
+            stroke_width = max(0.9, min(rect.width, rect.height) * 0.12)
+            border_width = max(0.45, min(rect.width, rect.height) * 0.045)
+            corners = (
+                _rotated_visual_point(page, rect.x0, rect.y0),
+                _rotated_visual_point(page, rect.x1, rect.y0),
+                _rotated_visual_point(page, rect.x1, rect.y1),
+                _rotated_visual_point(page, rect.x0, rect.y1),
+            )
+            for start, end in zip(corners, corners[1:] + corners[:1]):
+                page.draw_line(start, end, color=(0, 0, 0), width=border_width, overlay=True)
+            page.draw_line(
+                _rotated_visual_point(page, rect.x0 + inset, rect.y0 + inset),
+                _rotated_visual_point(page, rect.x1 - inset, rect.y1 - inset),
+                color=(0, 0, 0),
+                width=stroke_width,
+                overlay=True,
+            )
+            page.draw_line(
+                _rotated_visual_point(page, rect.x0 + inset, rect.y1 - inset),
+                _rotated_visual_point(page, rect.x1 - inset, rect.y0 + inset),
+                color=(0, 0, 0),
+                width=stroke_width,
+                overlay=True,
+            )
+        return
+    morph = _manual_block_morph(block)
+    page.draw_rect(
+        rect,
+        color=(1, 1, 1),
+        fill=(1, 1, 1),
+        width=0,
+        overlay=True,
+        morph=morph,
+    )
+    if block.isCheckbox and block.currentText.strip():
+        inset = max(1.0, min(rect.width, rect.height) * 0.16)
+        stroke_width = max(0.9, min(rect.width, rect.height) * 0.12)
+        page.draw_rect(
+            rect,
+            color=(0, 0, 0),
+            fill=None,
+            width=max(0.45, min(rect.width, rect.height) * 0.045),
+            overlay=True,
+            morph=morph,
+        )
+        page.draw_line(
+            pymupdf.Point(rect.x0 + inset, rect.y0 + inset),
+            pymupdf.Point(rect.x1 - inset, rect.y1 - inset),
+            color=(0, 0, 0),
+            width=stroke_width,
+            overlay=True,
+            morph=morph,
+        )
+        page.draw_line(
+            pymupdf.Point(rect.x0 + inset, rect.y1 - inset),
+            pymupdf.Point(rect.x1 - inset, rect.y0 + inset),
+            color=(0, 0, 0),
+            width=stroke_width,
+            overlay=True,
+            morph=morph,
+        )
 
 
 def _write_block_text(
@@ -7100,6 +7380,95 @@ def _write_block_text(
         )
         return
 
+    manual_morph = _manual_block_morph(block) if _is_manual_overlay_block(block) else None
+    if manual_morph is not None:
+        _ensure_page_font(page, runtime, font_spec, page_font_aliases)
+        rect = pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1)
+        if _is_manual_text_block(block):
+            baseline = _manual_text_baseline_for_export(block, rect)
+            line_height = max(block.lineHeight, block.fontSize * 1.15)
+            for index, line in enumerate(block.currentText.splitlines() or [block.currentText]):
+                if not line.strip():
+                    continue
+                fontsize = block.fontSize
+                width = _measure_text_width(line, fontsize, runtime, font_spec, measurement_fonts)
+                while fontsize >= block.minFontSize and width > rect.width + max(0.75, fontsize * 0.1):
+                    fontsize = round(fontsize - 0.25, 2)
+                    width = _measure_text_width(line, fontsize, runtime, font_spec, measurement_fonts)
+                page.insert_text(
+                    pymupdf.Point(rect.x0, baseline + index * line_height),
+                    line,
+                    fontname=font_spec.name,
+                    fontsize=fontsize,
+                    color=color,
+                    overlay=True,
+                    morph=manual_morph,
+                )
+                if _block_wants_underline(block):
+                    _draw_text_underline(
+                        page,
+                        x=rect.x0,
+                        baseline=baseline + index * line_height,
+                        width=width,
+                        fontsize=fontsize,
+                        color=color,
+                        bold=_is_bold_font_weight(block.fontWeight),
+                        morph=manual_morph,
+                    )
+            return
+        line_height = block.lineHeight / max(block.fontSize, 0.01)
+        inserted = page.insert_textbox(
+            rect,
+            block.currentText,
+            fontname=font_spec.name,
+            fontsize=block.fontSize,
+            color=color,
+            lineheight=line_height,
+            align=0,
+            overlay=True,
+            morph=manual_morph,
+        )
+        if inserted >= 0:
+            _draw_block_text_underlines(
+                page,
+                block,
+                rect,
+                block.fontSize,
+                color,
+                runtime,
+                font_spec,
+                measurement_fonts,
+                line_height=max(block.lineHeight, block.fontSize * 1.15),
+                morph=manual_morph,
+            )
+            return
+        fallback_baseline = block.baseline if block.baseline is not None else rect.y0 + block.fontSize
+        for index, line in enumerate(block.currentText.splitlines() or [block.currentText]):
+            if not line.strip():
+                continue
+            page.insert_text(
+                pymupdf.Point(rect.x0, fallback_baseline + index * max(block.lineHeight, block.fontSize * 1.15)),
+                line,
+                fontname=font_spec.name,
+                fontsize=block.fontSize,
+                color=color,
+                overlay=True,
+                morph=manual_morph,
+            )
+            if _block_wants_underline(block):
+                width = _measure_text_width(line, block.fontSize, runtime, font_spec, measurement_fonts)
+                _draw_text_underline(
+                    page,
+                    x=rect.x0,
+                    baseline=fallback_baseline + index * max(block.lineHeight, block.fontSize * 1.15),
+                    width=width,
+                    fontsize=block.fontSize,
+                    color=color,
+                    bold=_is_bold_font_weight(block.fontWeight),
+                    morph=manual_morph,
+                )
+        return
+
     _ensure_page_font(page, runtime, font_spec, page_font_aliases)
 
     if _is_iban_template_block(block):
@@ -7124,9 +7493,10 @@ def _write_block_text(
         return
 
     rect = pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1)
+    export_baseline = _manual_text_baseline_for_export(block, rect) if _is_manual_text_block(block) else block.baseline
     line_height = block.lineHeight / max(block.fontSize, 0.01)
     is_single_line = (
-        block.baseline is not None
+        export_baseline is not None
         and "\n" not in block.currentText
         and block.groupKind != "multiline"
     )
@@ -7138,21 +7508,22 @@ def _write_block_text(
             width = _measure_text_width(block.currentText, fontsize, runtime, font_spec, measurement_fonts)
             if width <= rect.width + slack:
                 page.insert_text(
-                    pymupdf.Point(rect.x0, block.baseline),
+                    pymupdf.Point(rect.x0, export_baseline),
                     block.currentText,
                     fontname=font_spec.name,
                     fontsize=fontsize,
                     color=color,
                     overlay=True,
                 )
-                if _is_contract_id_number_block(block):
+                if _block_wants_underline(block):
                     _draw_text_underline(
                         page,
                         x=rect.x0,
-                        baseline=block.baseline,
+                        baseline=export_baseline,
                         width=width,
                         fontsize=fontsize,
                         color=color,
+                        bold=_is_bold_font_weight(block.fontWeight),
                     )
                 return
             fontsize = round(fontsize - 0.25, 2)
@@ -7171,12 +7542,23 @@ def _write_block_text(
             overlay=True,
         )
         if inserted >= 0:
+            _draw_block_text_underlines(
+                page,
+                block,
+                rect,
+                fontsize,
+                color,
+                runtime,
+                font_spec,
+                measurement_fonts,
+                line_height=max(block.lineHeight, fontsize * 1.15),
+            )
             return
         fontsize = round(fontsize - 0.25, 2)
 
     fallback_fontsize = block.minFontSize
     fallback_line_height = max(block.lineHeight, fallback_fontsize * 1.15)
-    fallback_baseline = block.baseline if block.baseline is not None else rect.y0 + fallback_fontsize
+    fallback_baseline = export_baseline if export_baseline is not None else rect.y0 + fallback_fontsize
     for index, line in enumerate(block.currentText.splitlines() or [block.currentText]):
         if not line.strip():
             continue
@@ -7188,6 +7570,17 @@ def _write_block_text(
             color=color,
             overlay=True,
         )
+        if _block_wants_underline(block):
+            width = _measure_text_width(line, fallback_fontsize, runtime, font_spec, measurement_fonts)
+            _draw_text_underline(
+                page,
+                x=rect.x0,
+                baseline=fallback_baseline + index * fallback_line_height,
+                width=width,
+                fontsize=fallback_fontsize,
+                color=color,
+                bold=_is_bold_font_weight(block.fontWeight),
+            )
     return
 
 
@@ -7259,7 +7652,9 @@ def _write_rotated_page_block_text(
     _ensure_page_font(page, runtime, font_spec, page_font_aliases)
     lines = block.currentText.splitlines() or [block.currentText]
     line_height = max(block.lineHeight, block.fontSize * 1.15)
-    baseline = block.baseline if block.baseline is not None else rect.y0 + block.fontSize
+    baseline = _manual_text_baseline_for_export(block, rect) if _is_manual_text_block(block) else (
+        block.baseline if block.baseline is not None else rect.y0 + block.fontSize
+    )
 
     for index, line in enumerate(lines):
         if not line.strip():
@@ -7278,13 +7673,16 @@ def _write_rotated_page_block_text(
                     rotate=rotate,
                     overlay=True,
                 )
-                if _is_contract_id_number_block(block):
+                if _block_wants_underline(block):
                     underline_y = baseline + index * line_height + max(0.9, fontsize * 0.11)
+                    stroke_width = max(0.65, fontsize * 0.075)
+                    if _is_bold_font_weight(block.fontWeight):
+                        stroke_width = max(1.2, stroke_width * 1.75)
                     page.draw_line(
                         _rotated_visual_point(page, rect.x0, underline_y),
                         _rotated_visual_point(page, rect.x0 + width, underline_y),
                         color=color,
-                        width=max(0.65, fontsize * 0.075),
+                        width=stroke_width,
                         overlay=True,
                     )
                 break
@@ -7471,9 +7869,70 @@ def _write_reconstructed_page(
         )
 
 
+def _export_manual_image_overlay_document(session: DocumentSession, target_path: Optional[Path] = None) -> Path:
+    if not session.model.supportStatus.supported:
+        raise ValueError("Nicht unterstütztes Dokument kann nicht exportiert werden.")
+
+    session.model.fields = _sync_fields(session.model.fields)
+    target_path = target_path.resolve() if target_path else session.source_path.with_name(f"{session.source_path.stem}-bearbeitet.pdf")
+    if target_path == session.source_path:
+        raise ValueError("Die Original-PDF darf nicht überschrieben werden.")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    output_doc = pymupdf.open(session.source_path)
+    blocks_by_page: dict[int, list[TextBlock]] = {}
+    for block in session.model.fields:
+        if _is_manual_overlay_block(block):
+            blocks_by_page.setdefault(block.page, []).append(block)
+
+    try:
+        for page_index, output_page in enumerate(output_doc):
+            page_blocks = sorted(
+                blocks_by_page.get(page_index + 1, []),
+                key=lambda block: (block.bbox.y0, block.bbox.x0, block.zIndex, 1 if block.isCustom else 0),
+            )
+            for block in page_blocks:
+                _draw_manual_overlay_cover(output_page, block)
+
+            page_font_resources: dict[str, str] = {}
+            page_font_aliases: set[str] = set()
+            measurement_fonts: dict[str, pymupdf.Font] = {}
+            for block in page_blocks:
+                if block.isCheckbox:
+                    continue
+                if not block.currentText.strip() and not block.isCheckbox:
+                    continue
+                runtime = session.font_runtimes.get(block.fontAssetId or "")
+                font_spec = _resolve_export_font_spec(block, runtime, page_font_resources)
+                color = _hex_to_pdf_color(block.color)
+                _write_block_text(
+                    output_page,
+                    block,
+                    runtime,
+                    font_spec,
+                    color,
+                    page_font_aliases,
+                    measurement_fonts,
+                )
+
+        session_payload = _embedded_session_payload(session.model, page_hashes=_page_hashes(output_doc))
+        _write_embedded_session(output_doc, session_payload)
+        output_doc.save(target_path, garbage=4, deflate=True)
+        for field in session.model.fields:
+            field.originalText = field.currentText
+            field.originalValue = field.currentValue
+        session.model.fields = _sync_fields(session.model.fields)
+        return target_path
+    finally:
+        output_doc.close()
+
+
 def export_document(session: DocumentSession, target_path: Optional[Path] = None) -> Path:
     if not session.model.supportStatus.supported:
         raise ValueError("Nicht unterstütztes Dokument kann nicht exportiert werden.")
+
+    if _is_manual_overlay_session(session):
+        return _export_manual_image_overlay_document(session, target_path)
 
     session.model.fields = _sync_fields(session.model.fields)
     base_pdf_path = _session_pdf_base_path(session)

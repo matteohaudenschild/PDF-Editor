@@ -8,7 +8,10 @@ const outputRoot = path.join(projectRoot, "dist", "portable-win");
 const resourcesAppRoot = path.join(outputRoot, "resources", "app");
 const backendSourceRoot = path.join(projectRoot, "backend");
 const appSourceRoot = path.join(projectRoot, "app");
-const launcherOutputPath = path.join(projectRoot, "PDF Desktop Editor.exe");
+const appDisplayName = "PDF Editor";
+const appExecutableName = `${appDisplayName}.exe`;
+const launcherOutputPath = path.join(projectRoot, appExecutableName);
+const windowsIconPath = path.join(projectRoot, "app", "assets", "pdf-editor-old.ico");
 const rootPackageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
 
 function ensureExists(targetPath, description) {
@@ -34,7 +37,7 @@ function copyRecursive(sourcePath, targetPath) {
 function writeAppPackageJson() {
   const appPackageJson = {
     name: "pdf-desktop-editor",
-    productName: "PDF Desktop Editor",
+    productName: appDisplayName,
     version: rootPackageJson.version,
     description: rootPackageJson.description,
     main: "app/src/main/main.js",
@@ -54,6 +57,47 @@ function findCSharpCompiler() {
   ];
 
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function getRceditExecutablePath() {
+  const executableName = process.arch === "x64" || process.arch === "arm64"
+    ? "rcedit-x64.exe"
+    : "rcedit.exe";
+  return path.join(projectRoot, "node_modules", "rcedit", "bin", executableName);
+}
+
+function applyWindowsExecutableIcon(executablePath) {
+  ensureExists(windowsIconPath, "Windows-App-Icon");
+  const rceditPath = getRceditExecutablePath();
+  ensureExists(rceditPath, "rcedit");
+
+  const result = spawnSync(
+    rceditPath,
+    [
+      executablePath,
+      "--set-icon",
+      windowsIconPath,
+      "--set-version-string",
+      "FileDescription",
+      appDisplayName,
+      "--set-version-string",
+      "ProductName",
+      appDisplayName,
+      "--set-version-string",
+      "OriginalFilename",
+      appExecutableName,
+    ],
+    {
+      cwd: projectRoot,
+      encoding: "utf8",
+    },
+  );
+
+  if (result.status !== 0) {
+    throw new Error(
+      `Windows-Icon konnte nicht in die EXE geschrieben werden.\n${result.stdout || ""}\n${result.stderr || ""}`.trim(),
+    );
+  }
 }
 
 function buildRootLauncher() {
@@ -78,12 +122,12 @@ internal static class Program
     private static void Main()
     {
         var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-        var targetPath = Path.Combine(baseDir, "dist", "portable-win", "PDF Desktop Editor.exe");
+        var targetPath = Path.Combine(baseDir, "dist", "portable-win", "${appExecutableName}");
         if (!File.Exists(targetPath))
         {
             MessageBox.Show(
                 "Die portable App wurde nicht gefunden. Erwartet wurde:\\n" + targetPath,
-                "PDF Desktop Editor",
+                "${appDisplayName}",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error
             );
@@ -110,7 +154,7 @@ internal static class Program
       "/reference:System.dll",
       "/reference:System.Windows.Forms.dll",
       "/reference:System.Drawing.dll",
-      `/win32icon:${path.join(projectRoot, "app", "assets", "pdf-editor-icon.ico")}`,
+      `/win32icon:${windowsIconPath}`,
       `/out:${launcherOutputPath}`,
       sourcePath,
     ],
@@ -136,11 +180,12 @@ function buildPortable() {
   copyRecursive(electronDistRoot, outputRoot);
 
   const electronExePath = path.join(outputRoot, "electron.exe");
-  const portableExePath = path.join(outputRoot, "PDF Desktop Editor.exe");
+  const portableExePath = path.join(outputRoot, appExecutableName);
   if (fs.existsSync(portableExePath)) {
     fs.rmSync(portableExePath, { force: true });
   }
   fs.renameSync(electronExePath, portableExePath);
+  applyWindowsExecutableIcon(portableExePath);
 
   fs.mkdirSync(resourcesAppRoot, { recursive: true });
   writeAppPackageJson();

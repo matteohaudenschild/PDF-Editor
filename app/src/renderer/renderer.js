@@ -5,13 +5,35 @@ const state = {
   zoom: 1,
   fitZoom: 1,
   selectedBlockId: null,
+  editingBlockId: null,
   pendingFocusBlockId: null,
   drag: null,
   resize: null,
+  rotate: null,
+  suppressClickBlockId: null,
+  lastManualTextBlockId: null,
   lastExportPath: null,
   autoSaveTimer: null,
   updateInfo: null,
   updateInstalling: false,
+  backgroundLoadToken: 0,
+  renderedBackgroundPage: null,
+  renderedBackgroundUrl: "",
+  activePdfTool: "select",
+  manualTextStyle: {
+    fontFamily: "Helvetica",
+    fontKey: "Helvetica",
+    cssFontFamily: "Arial, Helvetica, sans-serif",
+    fontSize: 8,
+    fontWeight: "400",
+    fontStyle: "normal",
+    textDecoration: "none",
+  },
+  documentHistory: {
+    entries: [],
+    index: -1,
+    isRestoring: false,
+  },
   templateLearning: {
     active: false,
   },
@@ -34,8 +56,35 @@ const CUSTOM_BLOCK_DEFAULT_WIDTH = 110;
 const CUSTOM_BLOCK_DEFAULT_HEIGHT = 18;
 const CUSTOM_BLOCK_MIN_WIDTH = 36;
 const CUSTOM_BLOCK_MIN_HEIGHT = 14;
+const MANUAL_TEXT_DEFAULT_WIDTH = 85;
+const MANUAL_TEXT_DEFAULT_HEIGHT = 10;
+const MANUAL_TEXT_FONT_SIZE_PER_HEIGHT = 8 / MANUAL_TEXT_DEFAULT_HEIGHT;
+const MANUAL_TEXT_DESCENDER_RATIO = 0.32;
+const MANUAL_COVER_DEFAULT_WIDTH = MANUAL_TEXT_DEFAULT_WIDTH;
+const MANUAL_COVER_DEFAULT_HEIGHT = 11;
+const MANUAL_OVERLAY_MIN_SIZE = 1;
+const MANUAL_CHECKBOX_SIZE = 9;
+const MANUAL_CHECKBOX_MIN_SIZE = 6;
 const DRAG_THRESHOLD_PX = 4;
 const WHITEBOARD_HISTORY_LIMIT = 30;
+const DOCUMENT_HISTORY_LIMIT = 80;
+const MANUAL_TEXT_FONT_OPTIONS = [
+  {
+    value: "Helvetica",
+    fontKey: "Helvetica",
+    cssFontFamily: "Arial, Helvetica, sans-serif",
+  },
+  {
+    value: "Times-Roman",
+    fontKey: "Times-Roman",
+    cssFontFamily: '"Times New Roman", Times, serif',
+  },
+  {
+    value: "Courier",
+    fontKey: "Courier",
+    cssFontFamily: '"Courier New", Courier, monospace',
+  },
+];
 
 const el = {
   openButton: document.getElementById("openButton"),
@@ -53,6 +102,20 @@ const el = {
   whiteboardClearButton: document.getElementById("whiteboardClearButton"),
   whiteboardUndoButton: document.getElementById("whiteboardUndoButton"),
   whiteboardRedoButton: document.getElementById("whiteboardRedoButton"),
+  selectToolButton: document.getElementById("selectToolButton"),
+  addTextButton: document.getElementById("addTextButton"),
+  fontFamilyLabel: document.getElementById("fontFamilyLabel"),
+  fontFamilySelect: document.getElementById("fontFamilySelect"),
+  fontSizeLabel: document.getElementById("fontSizeLabel"),
+  fontSizeInput: document.getElementById("fontSizeInput"),
+  boldButton: document.getElementById("boldButton"),
+  italicButton: document.getElementById("italicButton"),
+  underlineButton: document.getElementById("underlineButton"),
+  eraseTextButton: document.getElementById("eraseTextButton"),
+  checkButton: document.getElementById("checkButton"),
+  uncheckButton: document.getElementById("uncheckButton"),
+  undoButton: document.getElementById("undoButton"),
+  redoButton: document.getElementById("redoButton"),
   prevButton: document.getElementById("prevButton"),
   nextButton: document.getElementById("nextButton"),
   zoomOutButton: document.getElementById("zoomOutButton"),
@@ -136,7 +199,7 @@ function updateUpdateBanner() {
 
   const sizeText = info.assetSize ? ` (${formatBytes(info.assetSize)})` : "";
   el.updateMessage.textContent =
-    `Update ${info.latestVersion} ist verfuegbar${sizeText}. Deine installierte Version ist ${info.currentVersion}.`;
+    `Update ${info.latestVersion} ist verfügbar${sizeText}. Deine installierte Version ist ${info.currentVersion}.`;
   el.updateInstallButton.disabled = state.updateInstalling;
   el.updateInstallButton.textContent = state.updateInstalling
     ? "Update wird vorbereitet..."
@@ -275,6 +338,143 @@ function inferFontFaceStyle(fontName) {
   };
 }
 
+function isBoldFontWeight(fontWeight) {
+  const value = String(fontWeight || "").trim().toLowerCase();
+  if (!value) {
+    return false;
+  }
+  if (value.includes("bold")) {
+    return true;
+  }
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue >= 600;
+}
+
+function getManualDisplayFontWeight(block) {
+  return isManualTextBlock(block) && isBoldFontWeight(block.fontWeight)
+    ? "700"
+    : (block.fontWeight || "400");
+}
+
+function getTextDecorationThickness(block, scale) {
+  if (String(block.textDecoration || "").toLowerCase() !== "underline") {
+    return "";
+  }
+  const fontSize = (Number(block.fontSize) || 8) * scale;
+  return isBoldFontWeight(block.fontWeight)
+    ? `${Math.max(1.6, fontSize * 0.18)}px`
+    : `${Math.max(1, fontSize * 0.08)}px`;
+}
+
+function getManualTextFontOption(fontFamily) {
+  const normalized = normalizeFontName(fontFamily);
+  if (normalized.includes("times")) {
+    return MANUAL_TEXT_FONT_OPTIONS.find((option) => option.value === "Times-Roman") || MANUAL_TEXT_FONT_OPTIONS[0];
+  }
+  if (normalized.includes("courier") || normalized.startsWith("cour")) {
+    return MANUAL_TEXT_FONT_OPTIONS.find((option) => option.value === "Courier") || MANUAL_TEXT_FONT_OPTIONS[0];
+  }
+  return MANUAL_TEXT_FONT_OPTIONS.find((option) => option.value === "Helvetica") || MANUAL_TEXT_FONT_OPTIONS[0];
+}
+
+function normalizeManualTextFontSize(value) {
+  const numericValue = Number(value);
+  const fallbackValue = Number(state.manualTextStyle.fontSize) || 8;
+  const fontSize = Number.isFinite(numericValue) && numericValue > 0 ? numericValue : fallbackValue;
+  return clamp(Math.round(fontSize * 10) / 10, 1, 72);
+}
+
+function getManualTextLineHeight(fontSize) {
+  return Math.max(1, Math.round(fontSize * 1.05 * 10) / 10);
+}
+
+function getManualTextDescenderPadding(fontSize) {
+  return Math.max(1, Math.round(fontSize * MANUAL_TEXT_DESCENDER_RATIO * 10) / 10);
+}
+
+function getManualTextBaselineOffset(fontSize) {
+  return Math.max(1, Math.round(fontSize * 0.74 * 10) / 10);
+}
+
+function clampManualTextBaselineForBox(bbox, fontSize, preferredBaseline) {
+  const y0 = Number(bbox?.y0) || 0;
+  const y1 = Number(bbox?.y1) || y0;
+  const boxHeight = Math.max(0, y1 - y0);
+  const fallbackBaseline = y0 + Math.max(1, Math.min(boxHeight, getManualTextBaselineOffset(fontSize)));
+  const rawBaseline = Number.isFinite(Number(preferredBaseline)) ? Number(preferredBaseline) : fallbackBaseline;
+  if (boxHeight <= 0) {
+    return rawBaseline;
+  }
+
+  const descenderPadding = getManualTextDescenderPadding(fontSize);
+  const minBaseline = y0 + Math.min(boxHeight, Math.max(1, fontSize * 0.5));
+  const maxBaseline = y0 + Math.max(1, boxHeight - descenderPadding);
+  return clamp(rawBaseline, Math.min(minBaseline, maxBaseline), Math.max(minBaseline, maxBaseline));
+}
+
+function getManualTextBaselineForBox(bbox, fontSize, lineHeight) {
+  const boxHeight = Math.max(0, (Number(bbox?.y1) || 0) - (Number(bbox?.y0) || 0));
+  const textLineHeight = Math.max(1, Number(lineHeight) || getManualTextLineHeight(fontSize));
+  const editorTop = Math.max(0, boxHeight - textLineHeight);
+  return clampManualTextBaselineForBox(
+    bbox,
+    fontSize,
+    (Number(bbox?.y0) || 0) + editorTop + getManualTextBaselineOffset(fontSize),
+  );
+}
+
+function syncManualTextBaselineToBox(block) {
+  if (!isManualTextBlock(block)) {
+    return;
+  }
+  block.baseline = clampManualTextBaselineForBox(
+    block.bbox,
+    Number(block.fontSize) || 8,
+    Number.isFinite(Number(block.baseline))
+      ? Number(block.baseline)
+      : getManualTextBaselineForBox(block.bbox, block.fontSize, block.lineHeight),
+  );
+}
+
+function getManualTextFontSizeForHeight(height) {
+  const safeHeight = Math.max(MANUAL_OVERLAY_MIN_SIZE, Number(height) || MANUAL_TEXT_DEFAULT_HEIGHT);
+  return normalizeManualTextFontSize(safeHeight * MANUAL_TEXT_FONT_SIZE_PER_HEIGHT);
+}
+
+function hasManualTextContent(block) {
+  return Boolean(String(block?.currentText || "").trim());
+}
+
+function syncManualTextSizeToBox(block) {
+  if (!isManualTextBlock(block) || hasManualTextContent(block)) {
+    return;
+  }
+
+  const height = block.bbox.y1 - block.bbox.y0;
+  const fontSize = getManualTextFontSizeForHeight(height);
+  block.fontSize = fontSize;
+  block.lineHeight = getManualTextLineHeight(fontSize);
+  block.baseline = getManualTextBaselineForBox(block.bbox, block.fontSize, block.lineHeight);
+  block.minFontSize = 1;
+}
+
+function syncManualTextEditorBox(editor, block, scale) {
+  if (!(editor instanceof HTMLElement) || !isManualTextBlock(block)) {
+    return;
+  }
+
+  syncManualTextBaselineToBox(block);
+  const baselineOffset = getManualTextBaselineOffset(Number(block.fontSize) || 8);
+  const editorTop = Math.max(0, (Number(block.baseline) || block.bbox.y0) - block.bbox.y0 - baselineOffset) * scale;
+  const visibleHeight = getBlockHeight(block, scale);
+  editor.style.fontSize = `${block.fontSize * scale}px`;
+  editor.style.lineHeight = `${block.lineHeight * scale}px`;
+  editor.style.textDecorationThickness = getTextDecorationThickness(block, scale);
+  editor.style.top = `${editorTop}px`;
+  editor.style.bottom = "auto";
+  editor.style.height = `${Math.max(block.lineHeight * scale, visibleHeight - editorTop)}px`;
+}
+
 function createBlockId(prefix) {
   if (window.crypto?.randomUUID) {
     return `${prefix}-${window.crypto.randomUUID()}`;
@@ -283,11 +483,13 @@ function createBlockId(prefix) {
 }
 
 function getBlockWidth(block, scale) {
-  return Math.max(4, (block.bbox.x1 - block.bbox.x0) * scale);
+  const minWidth = (isManualTextBlock(block) || isManualCoverBlock(block)) ? MANUAL_OVERLAY_MIN_SIZE : 4;
+  return Math.max(minWidth, (block.bbox.x1 - block.bbox.x0) * scale);
 }
 
 function getBlockHeight(block, scale) {
-  return Math.max(4, (block.bbox.y1 - block.bbox.y0) * scale);
+  const minHeight = (isManualTextBlock(block) || isManualCoverBlock(block)) ? MANUAL_OVERLAY_MIN_SIZE : 4;
+  return Math.max(minHeight, (block.bbox.y1 - block.bbox.y0) * scale);
 }
 
 function measureTextWidth(text, block, scale) {
@@ -931,6 +1133,12 @@ function autoSizeTextBlock(node, editor, block, scale) {
     return;
   }
 
+  if (isManualOverlayBlock(block)) {
+    node.style.width = `${getBlockWidth(block, scale)}px`;
+    node.style.height = `${getBlockHeight(block, scale)}px`;
+    return;
+  }
+
   if (block.isCustom) {
     const page = state.document?.pages.find((entry) => entry.pageNumber === block.page) ?? null;
     const currentWidth = Math.max(CUSTOM_BLOCK_MIN_WIDTH, block.bbox.x1 - block.bbox.x0);
@@ -1047,6 +1255,7 @@ function syncSelectedBlock() {
   const nodes = el.textLayer.querySelectorAll(".text-block");
   for (const node of nodes) {
     node.classList.toggle("selected", node.dataset.blockId === state.selectedBlockId);
+    node.classList.toggle("manual-editing", node.dataset.blockId === state.editingBlockId);
   }
 
   if (state.pendingFocusBlockId) {
@@ -1065,6 +1274,16 @@ function syncSelectedBlock() {
   }
 
   updateMeta();
+  syncManualTextStyleControls();
+}
+
+function syncDocumentBlockValues() {
+  for (const block of state.document?.blocks || []) {
+    block.currentValue = block.currentText || "";
+    if (typeof block.originalValue !== "string") {
+      block.originalValue = block.originalText || "";
+    }
+  }
 }
 
 function getCurrentPageModel() {
@@ -1077,6 +1296,115 @@ function getCurrentPageBlocks() {
 
 function getSelectedBlock() {
   return getCurrentPageBlocks().find((block) => block.id === state.selectedBlockId) ?? null;
+}
+
+function getSelectedManualTextBlock() {
+  const selected = getSelectedBlock();
+  return isManualTextBlock(selected) ? selected : null;
+}
+
+function getActiveManualTextStyleSource() {
+  return getSelectedManualTextBlock() || state.manualTextStyle;
+}
+
+function setPressedState(button, active) {
+  if (!button) {
+    return;
+  }
+  button.classList.toggle("active-text-style", active);
+  button.setAttribute("aria-pressed", active ? "true" : "false");
+}
+
+function updateManualTextStyleControlsVisibility(hasDoc) {
+  const showTextStyleControls = hasDoc && Boolean(getSelectedManualTextBlock());
+  document.body.classList.toggle("text-style-mode", showTextStyleControls);
+  const elements = [
+    el.fontFamilyLabel,
+    el.fontFamilySelect,
+    el.fontSizeLabel,
+    el.fontSizeInput,
+    el.boldButton,
+    el.italicButton,
+    el.underlineButton,
+  ];
+  for (const element of elements) {
+    if (!element) {
+      continue;
+    }
+    element.hidden = !showTextStyleControls;
+    if ("disabled" in element) {
+      element.disabled = !showTextStyleControls;
+    }
+  }
+}
+
+function syncManualTextStyleControls() {
+  const hasDoc = hasEditableDocument();
+  updateManualTextStyleControlsVisibility(hasDoc);
+  if (!hasDoc) {
+    return;
+  }
+
+  const style = getActiveManualTextStyleSource();
+  const fontOption = getManualTextFontOption(style.fontFamily);
+  if (el.fontFamilySelect) {
+    el.fontFamilySelect.value = fontOption.value;
+  }
+  if (el.fontSizeInput) {
+    el.fontSizeInput.value = String(normalizeManualTextFontSize(style.fontSize));
+  }
+  setPressedState(el.boldButton, isBoldFontWeight(style.fontWeight));
+  setPressedState(el.italicButton, String(style.fontStyle || "").toLowerCase() === "italic");
+  setPressedState(el.underlineButton, String(style.textDecoration || "").toLowerCase() === "underline");
+}
+
+function applyManualTextStylePatch(patch) {
+  const nextPatch = {};
+
+  if (Object.prototype.hasOwnProperty.call(patch, "fontFamily")) {
+    const fontOption = getManualTextFontOption(patch.fontFamily);
+    nextPatch.fontFamily = fontOption.value;
+    nextPatch.fontKey = fontOption.fontKey;
+    nextPatch.cssFontFamily = fontOption.cssFontFamily;
+    nextPatch.fontAssetId = null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "fontSize")) {
+    const fontSize = normalizeManualTextFontSize(patch.fontSize);
+    nextPatch.fontSize = fontSize;
+    nextPatch.lineHeight = getManualTextLineHeight(fontSize);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "fontWeight")) {
+    nextPatch.fontWeight = isBoldFontWeight(patch.fontWeight) ? "700" : "400";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "fontStyle")) {
+    nextPatch.fontStyle = String(patch.fontStyle || "").toLowerCase() === "italic" ? "italic" : "normal";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "textDecoration")) {
+    nextPatch.textDecoration = String(patch.textDecoration || "").toLowerCase() === "underline" ? "underline" : "none";
+  }
+
+  Object.assign(state.manualTextStyle, nextPatch);
+
+  const selected = getSelectedManualTextBlock();
+  if (selected) {
+    Object.assign(selected, nextPatch);
+    if (Object.prototype.hasOwnProperty.call(nextPatch, "fontSize")) {
+      selected.baseline = getManualTextBaselineForBox(selected.bbox, selected.fontSize, selected.lineHeight);
+      if (!isManualTextBlock(selected) && (selected.bbox.y1 - selected.bbox.y0) < nextPatch.lineHeight) {
+        selected.bbox.y1 = selected.bbox.y0 + nextPatch.lineHeight;
+      }
+    }
+    rememberManualTextBlock(selected);
+    renderTextLayer();
+    commitDocumentHistory();
+    scheduleDraftSave();
+  }
+
+  syncManualTextStyleControls();
 }
 
 function getBlockById(blockId) {
@@ -1172,6 +1500,7 @@ function createDefaultTemplateBlock(pageNumber) {
     fontAssetId: null,
     fontWeight: "400",
     fontStyle: "normal",
+    textDecoration: "none",
     baseline: 8.2,
     isCheckbox: false,
     isCustom: false,
@@ -1183,16 +1512,73 @@ function toggleCheckbox(block) {
     return;
   }
   block.currentText = block.currentText.trim() ? "" : "x";
+  block.currentValue = block.currentText;
   renderTextLayer();
+  commitDocumentHistory();
   scheduleDraftSave();
+}
+
+function isManualOverlayBlock(block) {
+  return Boolean(block?.isCustom) && String(block?.groupKind || "").startsWith("manual-");
+}
+
+function isManualCoverBlock(block) {
+  return isManualOverlayBlock(block) && String(block?.groupKind || "") === "manual-cover";
+}
+
+function isManualTextBlock(block) {
+  return isManualOverlayBlock(block) && String(block?.groupKind || "") === "manual-text";
+}
+
+function isManualCheckboxBlock(block) {
+  return isManualOverlayBlock(block) && String(block?.groupKind || "") === "manual-checkbox";
+}
+
+function rememberManualTextBlock(block) {
+  if (isManualTextBlock(block)) {
+    state.lastManualTextBlockId = block.id;
+  }
+}
+
+function getManualTextBlockFromElement(element) {
+  const owner = element instanceof HTMLElement ? element.closest(".text-block") : null;
+  const block = owner?.dataset.blockId ? getBlockById(owner.dataset.blockId) : null;
+  return isManualTextBlock(block) ? block : null;
+}
+
+function getManualTextBlockForKeyboard(activeElement = document.activeElement, options = {}) {
+  const { includeLast = true } = options;
+  const candidates = [
+    getManualTextBlockFromElement(activeElement),
+    state.editingBlockId ? getBlockById(state.editingBlockId) : null,
+    state.selectedBlockId ? getBlockById(state.selectedBlockId) : null,
+    includeLast && state.lastManualTextBlockId ? getBlockById(state.lastManualTextBlockId) : null,
+  ];
+  const seen = new Set();
+  for (const block of candidates) {
+    if (!isManualTextBlock(block) || seen.has(block.id) || block.page !== state.currentPage) {
+      continue;
+    }
+    seen.add(block.id);
+    return block;
+  }
+  return null;
+}
+
+function setActivePdfTool(tool) {
+  state.activePdfTool = ["select", "text", "erase", "check", "uncheck"].includes(tool) ? tool : "select";
+  updateButtons();
 }
 
 function clampToPage(page, value, size, padding = 2) {
   return Math.min(Math.max(value, 0), Math.max(0, (page - size) - padding));
 }
 
-function createCustomTextBlock(event) {
+function createManualOverlayBlock(event, tool = state.activePdfTool) {
   if (!state.document?.supportStatus?.supported) {
+    return;
+  }
+  if (typeof event.button === "number" && event.button !== 0) {
     return;
   }
 
@@ -1205,17 +1591,36 @@ function createCustomTextBlock(event) {
   }
   const template = findTemplateBlock(x, y) || createDefaultTemplateBlock(state.currentPage);
 
-  const width = CUSTOM_BLOCK_DEFAULT_WIDTH;
-  const height = CUSTOM_BLOCK_DEFAULT_HEIGHT;
-  const x0 = clampToPage(page.width, x, width);
-  const y0 = clampToPage(page.height, y, height);
+  const isTextTool = tool === "text";
+  const isCheckboxTool = tool === "check" || tool === "uncheck";
+  const isEraseTool = tool === "erase";
+  const manualTextStyle = state.manualTextStyle;
+  const manualFontOption = getManualTextFontOption(manualTextStyle.fontFamily);
+  const manualFontSize = normalizeManualTextFontSize(manualTextStyle.fontSize);
+  const manualLineHeight = getManualTextLineHeight(manualFontSize);
+  const width = isCheckboxTool
+    ? MANUAL_CHECKBOX_SIZE
+    : (isEraseTool ? MANUAL_COVER_DEFAULT_WIDTH : MANUAL_TEXT_DEFAULT_WIDTH);
+  const height = isCheckboxTool
+    ? MANUAL_CHECKBOX_SIZE
+    : (isEraseTool ? MANUAL_COVER_DEFAULT_HEIGHT : MANUAL_TEXT_DEFAULT_HEIGHT);
+  const x0 = clampToPage(page.width, isCheckboxTool ? x - (width / 2) : x, width);
+  const y0 = clampToPage(page.height, isCheckboxTool ? y - (height / 2) : y, height);
   const baselineOffset = typeof template.baseline === "number"
-    ? template.baseline - template.bbox.y0
-    : Math.max(template.fontSize * 0.82, 1);
+      ? template.baseline - template.bbox.y0
+      : Math.max(template.fontSize * 0.82, 1);
+  const text = tool === "check" ? "x" : "";
+  const groupKind = {
+    text: "manual-text",
+    erase: "manual-cover",
+    check: "manual-checkbox",
+    uncheck: "manual-checkbox",
+  }[tool] || "manual-text";
 
   const block = {
     id: createBlockId(`custom-page-${state.currentPage}`),
     page: state.currentPage,
+    fieldType: isCheckboxTool ? "checkbox" : "text-line",
     bbox: {
       x0,
       y0,
@@ -1223,30 +1628,51 @@ function createCustomTextBlock(event) {
       y1: y0 + height,
     },
     originalText: "",
-    currentText: "",
-    fontFamily: template.fontFamily,
-    fontKey: template.fontKey,
-    fontSize: template.fontSize,
+    currentText: text,
+    originalValue: "",
+    currentValue: text,
+    fontFamily: isCheckboxTool ? "Helvetica" : (isTextTool ? manualFontOption.value : template.fontFamily),
+    fontKey: isCheckboxTool ? "Helvetica" : (isTextTool ? manualFontOption.fontKey : template.fontKey),
+    fontSize: isCheckboxTool ? MANUAL_CHECKBOX_SIZE : (isTextTool ? manualFontSize : template.fontSize),
     color: template.color,
-    lineHeight: template.lineHeight,
+    lineHeight: isCheckboxTool ? MANUAL_CHECKBOX_SIZE : (isTextTool ? manualLineHeight : template.lineHeight),
     align: template.align,
     rotation: 0,
-    groupKind: "manual",
-    minFontSize: template.minFontSize,
+    groupKind,
+    minFontSize: isTextTool ? 1 : template.minFontSize,
     editable: true,
-    cssFontFamily: template.cssFontFamily,
-    fontAssetId: template.fontAssetId,
-    fontWeight: template.fontWeight,
-    fontStyle: template.fontStyle,
-    baseline: y0 + baselineOffset,
+    cssFontFamily: isCheckboxTool ? "Arial, sans-serif" : (isTextTool ? manualFontOption.cssFontFamily : template.cssFontFamily),
+    fontAssetId: isCheckboxTool || isTextTool ? null : template.fontAssetId,
+    fontWeight: isCheckboxTool ? "700" : (isTextTool ? manualTextStyle.fontWeight : template.fontWeight),
+    fontStyle: isTextTool ? manualTextStyle.fontStyle : template.fontStyle,
+    textDecoration: isTextTool ? manualTextStyle.textDecoration : (template.textDecoration || "none"),
+    baseline: isTextTool
+      ? getManualTextBaselineForBox({ y0, y1: y0 + height }, manualFontSize, manualLineHeight)
+      : y0 + baselineOffset,
+    isCheckbox: isCheckboxTool,
     isCustom: true,
   };
 
   state.document.blocks.push(block);
-  state.selectedBlockId = block.id;
-  state.pendingFocusBlockId = block.id;
+  rememberManualTextBlock(block);
+  state.selectedBlockId = tool === "text" ? null : block.id;
+  state.editingBlockId = null;
+  state.pendingFocusBlockId = null;
   renderTextLayer();
+  commitDocumentHistory();
   scheduleDraftSave();
+  if (isTextTool || isEraseTool || isCheckboxTool) {
+    setActivePdfTool("select");
+  }
+  setStatus(
+    tool === "text"
+      ? "Weißes Textfeld gesetzt. Zum Schreiben anklicken."
+      : (tool === "erase" ? "Weiße Löschfläche gesetzt." : "Ankreuzfeld gesetzt."),
+  );
+}
+
+function createCustomTextBlock(event) {
+  createManualOverlayBlock(event, "text");
 }
 
 function beginPotentialDrag(block, node, event) {
@@ -1270,11 +1696,14 @@ function beginPotentialDrag(block, node, event) {
 }
 
 function clearDragState() {
+  if (state.drag?.node) {
+    state.drag.node.classList.remove("manual-overlay-dragging");
+  }
   state.drag = null;
   document.body.classList.remove("dragging-block");
 }
 
-function beginResize(block, node, event) {
+function beginResize(block, node, event, handle = "se") {
   if (!block.isCustom || event.button !== 0) {
     return;
   }
@@ -1289,17 +1718,73 @@ function beginResize(block, node, event) {
     originHeight: block.bbox.y1 - block.bbox.y0,
     originX0: block.bbox.x0,
     originY0: block.bbox.y0,
+    originX1: block.bbox.x1,
+    originY1: block.bbox.y1,
+    originBaseline: typeof block.baseline === "number" ? block.baseline : null,
+    originBaselineOffset: typeof block.baseline === "number" ? block.baseline - block.bbox.y0 : null,
+    handle,
+    handleNode: event.currentTarget instanceof HTMLElement ? event.currentTarget : null,
     resizing: false,
   };
 }
 
 function clearResizeState() {
+  if (state.resize?.handleNode) {
+    state.resize.handleNode.classList.remove("manual-resize-active");
+  }
+  if (state.resize?.node) {
+    state.resize.node.classList.remove("manual-overlay-resizing");
+  }
   state.resize = null;
   document.body.classList.remove("resizing-block");
 }
 
+function getPagePointFromClient(event) {
+  const containerRect = el.pageContainer.getBoundingClientRect();
+  return {
+    x: (event.clientX - containerRect.left) / state.zoom,
+    y: (event.clientY - containerRect.top) / state.zoom,
+  };
+}
+
+function normalizeRotation(degrees) {
+  let value = degrees % 360;
+  if (value > 180) {
+    value -= 360;
+  }
+  if (value < -180) {
+    value += 360;
+  }
+  return Math.round(value * 10) / 10;
+}
+
+function beginRotate(block, node, event) {
+  if (!block.isCustom || event.button !== 0) {
+    return;
+  }
+
+  const centerX = (block.bbox.x0 + block.bbox.x1) / 2;
+  const centerY = (block.bbox.y0 + block.bbox.y1) / 2;
+  const point = getPagePointFromClient(event);
+  state.rotate = {
+    blockId: block.id,
+    node,
+    pageNumber: block.page,
+    centerX,
+    centerY,
+    startAngle: Math.atan2(point.y - centerY, point.x - centerX) * 180 / Math.PI,
+    originRotation: Number(block.rotation) || 0,
+    rotating: false,
+  };
+}
+
+function clearRotateState() {
+  state.rotate = null;
+  document.body.classList.remove("rotating-block");
+}
+
 function handleDragMove(event) {
-  if (state.resize || !state.drag || !state.document?.supportStatus?.supported) {
+  if (state.resize || state.rotate || !state.drag || !state.document?.supportStatus?.supported) {
     return;
   }
 
@@ -1313,6 +1798,7 @@ function handleDragMove(event) {
     }
     drag.dragging = true;
     document.body.classList.add("dragging-block");
+    drag.node?.classList.add("manual-overlay-dragging");
     const selection = window.getSelection();
     selection?.removeAllRanges();
   }
@@ -1358,6 +1844,8 @@ function handleResizeMove(event) {
     }
     resize.resizing = true;
     document.body.classList.add("resizing-block");
+    resize.node?.classList.add("manual-overlay-resizing");
+    resize.handleNode?.classList.add("manual-resize-active");
     const selection = window.getSelection();
     selection?.removeAllRanges();
   }
@@ -1371,37 +1859,126 @@ function handleResizeMove(event) {
 
   event.preventDefault();
 
-  const nextWidth = Math.min(
-    page.width - resize.originX0,
-    Math.max(CUSTOM_BLOCK_MIN_WIDTH, resize.originWidth + (dx / state.zoom)),
-  );
-  const nextHeight = Math.min(
-    page.height - resize.originY0,
-    Math.max(CUSTOM_BLOCK_MIN_HEIGHT, resize.originHeight + (dy / state.zoom)),
-  );
+  const isFlexibleManualOverlay = isManualTextBlock(block) || isManualCoverBlock(block);
+  const minWidth = isManualCheckboxBlock(block)
+    ? MANUAL_CHECKBOX_MIN_SIZE
+    : isFlexibleManualOverlay
+    ? MANUAL_OVERLAY_MIN_SIZE
+    : CUSTOM_BLOCK_MIN_WIDTH;
+  const minHeight = isManualCheckboxBlock(block)
+    ? MANUAL_CHECKBOX_MIN_SIZE
+    : isFlexibleManualOverlay
+    ? MANUAL_OVERLAY_MIN_SIZE
+    : CUSTOM_BLOCK_MIN_HEIGHT;
+  let nextX0 = resize.originX0;
+  let nextY0 = resize.originY0;
+  let nextX1 = resize.originX1;
+  let nextY1 = resize.originY1;
+  const docDx = dx / state.zoom;
+  const docDy = dy / state.zoom;
 
-  block.bbox.x1 = block.bbox.x0 + nextWidth;
-  block.bbox.y1 = block.bbox.y0 + nextHeight;
+  if (resize.handle.includes("w")) {
+    nextX0 = Math.min(resize.originX1 - minWidth, resize.originX0 + docDx);
+  }
+  if (resize.handle.includes("e")) {
+    nextX1 = Math.max(resize.originX0 + minWidth, resize.originX1 + docDx);
+  }
+  if (resize.handle.includes("n")) {
+    nextY0 = Math.min(resize.originY1 - minHeight, resize.originY0 + docDy);
+  }
+  if (resize.handle.includes("s")) {
+    nextY1 = Math.max(resize.originY0 + minHeight, resize.originY1 + docDy);
+  }
+
+  nextX0 = clamp(nextX0, 0, page.width - minWidth);
+  nextY0 = clamp(nextY0, 0, page.height - minHeight);
+  nextX1 = clamp(nextX1, nextX0 + minWidth, page.width);
+  nextY1 = clamp(nextY1, nextY0 + minHeight, page.height);
+
+  block.bbox.x0 = nextX0;
+  block.bbox.y0 = nextY0;
+  block.bbox.x1 = nextX1;
+  block.bbox.y1 = nextY1;
+  syncManualTextSizeToBox(block);
+  if (isManualTextBlock(block)) {
+    block.baseline = getManualTextBaselineForBox(block.bbox, block.fontSize, block.lineHeight);
+  } else if (typeof resize.originBaselineOffset === "number") {
+    block.baseline = nextY0 + resize.originBaselineOffset;
+  }
 
   if (resize.node) {
-    resize.node.style.width = `${nextWidth * state.zoom}px`;
-    resize.node.style.height = `${nextHeight * state.zoom}px`;
+    resize.node.style.left = `${nextX0 * state.zoom}px`;
+    resize.node.style.top = `${nextY0 * state.zoom}px`;
+    resize.node.style.width = `${(nextX1 - nextX0) * state.zoom}px`;
+    resize.node.style.height = `${(nextY1 - nextY0) * state.zoom}px`;
+    syncManualTextEditorBox(resize.node.querySelector(".text-editor"), block, state.zoom);
+  }
+}
+
+function handleRotateMove(event) {
+  if (!state.rotate || !state.document?.supportStatus?.supported) {
+    return;
+  }
+
+  const rotate = state.rotate;
+  const point = getPagePointFromClient(event);
+  const currentAngle = Math.atan2(point.y - rotate.centerY, point.x - rotate.centerX) * 180 / Math.PI;
+  const delta = currentAngle - rotate.startAngle;
+
+  if (!rotate.rotating) {
+    if (Math.abs(delta) < 1.5) {
+      return;
+    }
+    rotate.rotating = true;
+    document.body.classList.add("rotating-block");
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+  }
+
+  const block = getBlockById(rotate.blockId);
+  if (!block) {
+    clearRotateState();
+    return;
+  }
+
+  event.preventDefault();
+  block.rotation = normalizeRotation(rotate.originRotation + delta);
+  if (rotate.node) {
+    rotate.node.style.transform = `rotate(${block.rotation}deg)`;
   }
 }
 
 function handleDragEnd() {
+  if (state.rotate) {
+    const wasRotating = state.rotate.rotating;
+    const blockId = state.rotate.blockId;
+    clearRotateState();
+    if (wasRotating) {
+      state.suppressClickBlockId = blockId;
+      commitDocumentHistory();
+      scheduleDraftSave();
+    }
+  }
+
   if (state.resize) {
     const wasResizing = state.resize.resizing;
+    const blockId = state.resize.blockId;
     clearResizeState();
     if (wasResizing) {
+      state.suppressClickBlockId = blockId;
+      syncManualTextStyleControls();
+      commitDocumentHistory();
       scheduleDraftSave();
     }
   }
 
   if (state.drag) {
     const wasDragging = state.drag.dragging;
+    const blockId = state.drag.blockId;
     clearDragState();
     if (wasDragging) {
+      state.suppressClickBlockId = blockId;
+      commitDocumentHistory();
       scheduleDraftSave();
     }
   }
@@ -1414,12 +1991,94 @@ function removeSelectedCustomBlock() {
   }
 
   state.document.blocks = state.document.blocks.filter((block) => block.id !== selected.id);
+  if (state.lastManualTextBlockId === selected.id) {
+    state.lastManualTextBlockId = null;
+  }
   state.selectedBlockId = null;
+  state.editingBlockId = null;
   state.pendingFocusBlockId = null;
   renderTextLayer();
+  commitDocumentHistory();
   scheduleDraftSave();
   setStatus("Manuelles Feld entfernt.");
   return true;
+}
+
+function removeManualTextBlockIfEmpty(block, editor = null) {
+  if (!isManualTextBlock(block) || !state.document) {
+    return false;
+  }
+
+  const text = editor instanceof HTMLElement
+    ? readEditableText(editor)
+    : (block.currentText || "");
+  if (text.trim()) {
+    return false;
+  }
+
+  state.selectedBlockId = block.id;
+  state.editingBlockId = null;
+  block.currentText = "";
+  block.currentValue = "";
+  if (editor instanceof HTMLElement) {
+    editor.blur();
+  }
+  return removeSelectedCustomBlock();
+}
+
+function handleDeleteForEmptyManualTextBlock(event) {
+  if (event.key !== "Delete" && event.key !== "Backspace") {
+    return false;
+  }
+
+  const active = document.activeElement;
+  const block = getManualTextBlockForKeyboard(active, { includeLast: false });
+  const activeEditor = active instanceof HTMLElement
+    && active.classList.contains("text-editor")
+    && getManualTextBlockFromElement(active)?.id === block?.id
+    ? active
+    : null;
+
+  if (!removeManualTextBlockIfEmpty(block, activeEditor)) {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation?.();
+  return true;
+}
+
+function isKeyboardDeletableManualOverlayBlock(block) {
+  return isManualCoverBlock(block) || isManualCheckboxBlock(block);
+}
+
+function handleDeleteForSelectedManualOverlayBlock(event) {
+  if (event.key !== "Delete" && event.key !== "Backspace") {
+    return false;
+  }
+
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLElement
+    && (active.classList.contains("text-editor") || active.classList.contains("masked-template-capture"))
+  ) {
+    return false;
+  }
+
+  const activeOwner = active instanceof HTMLElement ? active.closest(".text-block") : null;
+  const activeBlock = activeOwner?.dataset.blockId ? getBlockById(activeOwner.dataset.blockId) : null;
+  const block = isKeyboardDeletableManualOverlayBlock(activeBlock) ? activeBlock : getSelectedBlock();
+  if (!isKeyboardDeletableManualOverlayBlock(block)) {
+    return false;
+  }
+
+  state.selectedBlockId = block.id;
+  state.editingBlockId = null;
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation?.();
+  return removeSelectedCustomBlock();
 }
 
 function clearSelection(options = {}) {
@@ -1437,11 +2096,166 @@ function clearSelection(options = {}) {
     }
   }
 
+  state.editingBlockId = null;
   syncSelectedBlock();
 }
 
 function hasEditableDocument() {
   return Boolean(state.document?.supportStatus?.supported);
+}
+
+function clonePlainData(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function createDocumentHistorySnapshot() {
+  if (!hasEditableDocument()) {
+    return null;
+  }
+
+  return {
+    currentPage: state.currentPage,
+    selectedBlockId: state.selectedBlockId,
+    lastManualTextBlockId: state.lastManualTextBlockId,
+    manualTextStyle: clonePlainData(state.manualTextStyle),
+    blocks: clonePlainData(state.document.blocks || []),
+  };
+}
+
+function getDocumentHistoryKey(snapshot) {
+  if (!snapshot) {
+    return "";
+  }
+  return JSON.stringify({
+    manualTextStyle: snapshot.manualTextStyle,
+    blocks: snapshot.blocks,
+  });
+}
+
+function canUndoDocument() {
+  return hasEditableDocument()
+    && !state.documentHistory.isRestoring
+    && state.documentHistory.index > 0;
+}
+
+function canRedoDocument() {
+  return hasEditableDocument()
+    && !state.documentHistory.isRestoring
+    && state.documentHistory.index >= 0
+    && state.documentHistory.index < state.documentHistory.entries.length - 1;
+}
+
+function resetDocumentHistory() {
+  state.documentHistory.entries = [];
+  state.documentHistory.index = -1;
+  state.documentHistory.isRestoring = false;
+
+  const snapshot = createDocumentHistorySnapshot();
+  if (snapshot) {
+    state.documentHistory.entries.push({
+      snapshot,
+      key: getDocumentHistoryKey(snapshot),
+    });
+    state.documentHistory.index = 0;
+  }
+
+  updateButtons();
+}
+
+function commitDocumentHistory() {
+  if (!hasEditableDocument() || state.documentHistory.isRestoring) {
+    return false;
+  }
+
+  const snapshot = createDocumentHistorySnapshot();
+  if (!snapshot) {
+    return false;
+  }
+
+  const key = getDocumentHistoryKey(snapshot);
+  const currentEntry = state.documentHistory.entries[state.documentHistory.index] ?? null;
+  if (currentEntry?.key === key) {
+    updateButtons();
+    return false;
+  }
+
+  if (state.documentHistory.index < state.documentHistory.entries.length - 1) {
+    state.documentHistory.entries.splice(state.documentHistory.index + 1);
+  }
+
+  state.documentHistory.entries.push({ snapshot, key });
+  if (state.documentHistory.entries.length > DOCUMENT_HISTORY_LIMIT) {
+    const overflow = state.documentHistory.entries.length - DOCUMENT_HISTORY_LIMIT;
+    state.documentHistory.entries.splice(0, overflow);
+  }
+
+  state.documentHistory.index = state.documentHistory.entries.length - 1;
+  updateButtons();
+  return true;
+}
+
+async function restoreDocumentHistorySnapshot(snapshot) {
+  if (!snapshot || !state.document) {
+    return;
+  }
+
+  const pageCount = Math.max(1, Number(state.document.pageCount) || 1);
+  const nextPage = clamp(Math.round(Number(snapshot.currentPage) || 1), 1, pageCount);
+  const pageChanged = state.currentPage !== nextPage || state.renderedBackgroundPage !== nextPage;
+  state.currentPage = nextPage;
+  state.document.blocks = clonePlainData(snapshot.blocks) || [];
+  state.manualTextStyle = {
+    ...state.manualTextStyle,
+    ...(clonePlainData(snapshot.manualTextStyle) || {}),
+  };
+
+  const blockExists = (blockId) => Boolean(blockId && state.document.blocks.some((block) => block.id === blockId));
+  state.selectedBlockId = blockExists(snapshot.selectedBlockId) ? snapshot.selectedBlockId : null;
+  state.editingBlockId = null;
+  state.pendingFocusBlockId = null;
+  state.suppressClickBlockId = null;
+  state.lastManualTextBlockId = blockExists(snapshot.lastManualTextBlockId)
+    ? snapshot.lastManualTextBlockId
+    : null;
+
+  syncDocumentBlockValues();
+  updateButtons();
+  updateMeta();
+  if (pageChanged) {
+    await loadBackground({ preserveCurrent: true });
+  } else {
+    renderTextLayer();
+  }
+  scheduleDraftSave();
+}
+
+async function moveDocumentHistory(step) {
+  if (state.documentHistory.isRestoring || !hasEditableDocument()) {
+    return;
+  }
+
+  const nextIndex = state.documentHistory.index + step;
+  if (nextIndex < 0 || nextIndex >= state.documentHistory.entries.length) {
+    return;
+  }
+
+  state.documentHistory.isRestoring = true;
+  clearDragState();
+  clearResizeState();
+  clearRotateState();
+  state.documentHistory.index = nextIndex;
+  updateButtons();
+
+  try {
+    await restoreDocumentHistorySnapshot(state.documentHistory.entries[nextIndex]?.snapshot);
+    setStatus(step < 0 ? "Ein Schritt zurück." : "Ein Schritt vor.");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message);
+  } finally {
+    state.documentHistory.isRestoring = false;
+    updateButtons();
+  }
 }
 
 function hasManualTemplateFields() {
@@ -1849,8 +2663,25 @@ function clamp(value, min, max) {
 function updateButtons() {
   const hasDoc = hasEditableDocument();
   const hasService = Boolean(state.serviceBaseUrl);
+  const toolButtons = [
+    [el.selectToolButton, "select"],
+    [el.addTextButton, "text"],
+    [el.eraseTextButton, "erase"],
+    [el.checkButton, "check"],
+    [el.uncheckButton, "uncheck"],
+  ];
+  for (const [button, tool] of toolButtons) {
+    if (!button) {
+      continue;
+    }
+    button.hidden = !hasDoc;
+    button.disabled = !hasDoc;
+    button.classList.toggle("active-tool", hasDoc && state.activePdfTool === tool);
+  }
   el.prevButton.hidden = !hasDoc;
   el.nextButton.hidden = !hasDoc;
+  el.undoButton.hidden = !hasDoc;
+  el.redoButton.hidden = !hasDoc;
   el.zoomOutButton.hidden = !hasDoc;
   el.zoomFitButton.hidden = !hasDoc;
   el.zoomInButton.hidden = !hasDoc;
@@ -1859,6 +2690,8 @@ function updateButtons() {
   el.saveTemplateButton.hidden = true;
   el.prevButton.disabled = !hasDoc || state.currentPage <= 1;
   el.nextButton.disabled = !hasDoc || state.currentPage >= (state.document?.pageCount ?? 0);
+  el.undoButton.disabled = !canUndoDocument();
+  el.redoButton.disabled = !canRedoDocument();
   el.zoomOutButton.disabled = !hasDoc;
   el.zoomFitButton.disabled = !hasDoc;
   el.zoomInButton.disabled = !hasDoc;
@@ -1874,6 +2707,7 @@ function updateButtons() {
     el.updateInstallButton.disabled = state.updateInstalling;
   }
   updateWhiteboardToolButtons();
+  syncManualTextStyleControls();
 }
 
 function updateMeta() {
@@ -1882,14 +2716,8 @@ function updateMeta() {
     return;
   }
 
-  const selected = getSelectedBlock();
-  const selectedText = selected ? ` | Auswahl: ${selected.originalText.slice(0, 60)}` : "";
-  const templateText = state.document?.detectedTemplateId ? ` | Vorlage: ${state.document.detectedTemplateId}` : "";
-  const documentClassText = state.document?.documentClass ? ` | Typ: ${state.document.documentClass}` : "";
-  const supportModeText = state.document?.supportStatus?.supportMode ? ` | Modus: ${state.document.supportStatus.supportMode}` : "";
-  const embeddedText = state.document?.embeddedSessionFound ? " | Eingebettete Sitzung" : "";
-  el.meta.textContent =
-    `${state.document.sourcePath} | Seite ${state.currentPage}/${state.document.pageCount} | Zoom ${Math.round(state.zoom * 100)}%${documentClassText}${supportModeText}${templateText}${embeddedText}${selectedText}`;
+  const sourceName = String(state.document.sourcePath || "Dokument.pdf").split(/[\\/]/).pop() || "Dokument.pdf";
+  el.meta.textContent = `${sourceName} | Seite ${state.currentPage}/${state.document.pageCount}`;
 }
 
 function showSupportStatus() {
@@ -1931,9 +2759,22 @@ function injectFontFaces() {
   document.head.appendChild(style);
 }
 
-async function loadBackground() {
+function applyPageDisplaySize(page, displayWidth, displayHeight) {
+  el.backgroundImage.style.width = `${displayWidth}px`;
+  el.backgroundImage.style.height = `${displayHeight}px`;
+  el.pageContainer.style.width = `${displayWidth}px`;
+  el.pageContainer.style.height = `${displayHeight}px`;
+  el.textLayer.style.width = `${displayWidth}px`;
+  el.textLayer.style.height = `${displayHeight}px`;
+}
+
+async function loadBackground(options = {}) {
+  const { preserveCurrent = false } = options;
   const page = getCurrentPageModel();
   if (!page) {
+    state.backgroundLoadToken += 1;
+    state.renderedBackgroundPage = null;
+    state.renderedBackgroundUrl = "";
     el.pageContainer.hidden = true;
     el.backgroundImage.hidden = true;
     el.backgroundImage.removeAttribute("src");
@@ -1947,27 +2788,144 @@ async function loadBackground() {
   const displayHeight = page.height * state.zoom;
   const deviceScale = Math.max(2, Math.min(window.devicePixelRatio || 1, 3));
   const targetWidth = Math.max(1, Math.round(displayWidth * deviceScale));
-  const backgroundUrl = `${state.serviceBaseUrl}/documents/${state.document.id}/pages/${state.currentPage}/background?width=${targetWidth}&ts=${Date.now()}`;
-  el.pageContainer.hidden = true;
-  el.backgroundImage.hidden = true;
-  el.backgroundImage.onload = () => {
-    el.backgroundImage.style.width = `${displayWidth}px`;
-    el.backgroundImage.style.height = `${displayHeight}px`;
-    el.pageContainer.style.width = `${displayWidth}px`;
-    el.pageContainer.style.height = `${displayHeight}px`;
-    el.textLayer.style.width = `${displayWidth}px`;
-    el.textLayer.style.height = `${displayHeight}px`;
+  const backgroundUrl = `${state.serviceBaseUrl}/documents/${state.document.id}/pages/${state.currentPage}/background?width=${targetWidth}`;
+  const canPreserveCurrent = Boolean(
+    preserveCurrent
+    && !el.pageContainer.hidden
+    && !el.backgroundImage.hidden
+    && state.renderedBackgroundPage === state.currentPage
+    && el.backgroundImage.getAttribute("src"),
+  );
+
+  if (canPreserveCurrent) {
+    applyPageDisplaySize(page, displayWidth, displayHeight);
+    renderTextLayer();
+  } else {
+    el.pageContainer.hidden = true;
+    el.backgroundImage.hidden = true;
+    el.textLayer.innerHTML = "";
+  }
+
+  if (state.renderedBackgroundPage === state.currentPage && state.renderedBackgroundUrl === backgroundUrl) {
+    applyPageDisplaySize(page, displayWidth, displayHeight);
     el.backgroundImage.hidden = false;
     el.pageContainer.hidden = false;
     renderTextLayer();
-  };
-  el.backgroundImage.onerror = () => {
-    el.backgroundImage.hidden = true;
-    el.pageContainer.hidden = true;
-    el.textLayer.innerHTML = "";
-    setStatus("PDF-Hintergrund konnte nicht geladen werden.");
-  };
-  el.backgroundImage.src = backgroundUrl;
+    return;
+  }
+
+  const loadToken = state.backgroundLoadToken + 1;
+  state.backgroundLoadToken = loadToken;
+
+  await new Promise((resolve) => {
+    const nextImage = new Image();
+    nextImage.onload = () => {
+      if (loadToken !== state.backgroundLoadToken) {
+        resolve();
+        return;
+      }
+      applyPageDisplaySize(page, displayWidth, displayHeight);
+      el.backgroundImage.onload = null;
+      el.backgroundImage.onerror = null;
+      el.backgroundImage.src = backgroundUrl;
+      el.backgroundImage.hidden = false;
+      el.pageContainer.hidden = false;
+      state.renderedBackgroundPage = state.currentPage;
+      state.renderedBackgroundUrl = backgroundUrl;
+      renderTextLayer();
+      resolve();
+    };
+    nextImage.onerror = () => {
+      if (loadToken !== state.backgroundLoadToken) {
+        resolve();
+        return;
+      }
+      if (!canPreserveCurrent) {
+        el.backgroundImage.hidden = true;
+        el.pageContainer.hidden = true;
+        el.textLayer.innerHTML = "";
+      }
+      setStatus("PDF-Hintergrund konnte nicht geladen werden.");
+      resolve();
+    };
+    nextImage.src = backgroundUrl;
+  });
+}
+
+function appendCustomBlockControls(node, block) {
+  if (!block.isCustom || isManualOverlayBlock(block)) {
+    return;
+  }
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "delete-handle";
+  deleteButton.textContent = "X";
+  deleteButton.title = "Feld löschen";
+  deleteButton.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  deleteButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.selectedBlockId = block.id;
+    removeSelectedCustomBlock();
+  });
+  node.appendChild(deleteButton);
+
+  for (const handle of ["nw", "ne", "sw", "se"]) {
+    const resizeHandle = document.createElement("div");
+    resizeHandle.className = `resize-handle resize-${handle}`;
+    resizeHandle.contentEditable = "false";
+    resizeHandle.tabIndex = -1;
+    resizeHandle.title = "Größe ändern";
+    resizeHandle.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      state.selectedBlockId = block.id;
+      state.editingBlockId = null;
+      rememberManualTextBlock(block);
+      syncSelectedBlock();
+      beginResize(block, node, event, handle);
+    });
+    node.appendChild(resizeHandle);
+  }
+
+  const rotateHandle = document.createElement("div");
+  rotateHandle.className = "rotate-handle";
+  rotateHandle.contentEditable = "false";
+  rotateHandle.tabIndex = -1;
+  rotateHandle.title = "Drehen";
+  rotateHandle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.selectedBlockId = block.id;
+    state.editingBlockId = null;
+    syncSelectedBlock();
+    beginRotate(block, node, event);
+  });
+  node.appendChild(rotateHandle);
+}
+
+function appendManualTransformHandles(node, block) {
+  for (const handle of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
+    const resizeHandle = document.createElement("div");
+    resizeHandle.className = `resize-handle resize-${handle}`;
+    resizeHandle.contentEditable = "false";
+    resizeHandle.tabIndex = -1;
+    resizeHandle.title = "Größe ändern";
+    resizeHandle.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      state.selectedBlockId = block.id;
+      state.editingBlockId = null;
+      rememberManualTextBlock(block);
+      syncSelectedBlock();
+      beginResize(block, node, event, handle);
+    });
+    node.appendChild(resizeHandle);
+  }
 }
 
 function renderTextLayer() {
@@ -2005,6 +2963,9 @@ function renderTextLayer() {
     if (block.editable === false && !block.isCheckbox) {
       continue;
     }
+    if (isManualTextBlock(block)) {
+      syncManualTextBaselineToBox(block);
+    }
 
     const node = document.createElement("div");
     node.className = "text-block";
@@ -2013,6 +2974,15 @@ function renderTextLayer() {
     }
     if (block.isCustom) {
       node.classList.add("custom-block");
+    }
+    if (isManualOverlayBlock(block)) {
+      node.classList.add("manual-overlay-block");
+    }
+    if (isManualCoverBlock(block)) {
+      node.classList.add("manual-cover-block");
+    }
+    if (isManualTextBlock(block) && state.editingBlockId === block.id) {
+      node.classList.add("manual-editing");
     }
     if (isFixedGeneratedField(block)) {
       node.classList.add("generated-block");
@@ -2037,11 +3007,17 @@ function renderTextLayer() {
     node.style.top = `${block.bbox.y0 * scale}px`;
     node.style.width = `${getBlockWidth(block, scale)}px`;
     node.style.height = `${getBlockHeight(block, scale)}px`;
+    node.style.transform = `rotate(${Number(block.rotation) || 0}deg)`;
     node.style.setProperty("--masked-text-color", block.color || "#000");
 
     if (block.isCheckbox) {
       const renderMark = block.currentText.trim() && !isUnchangedScanGeneratedCheckbox(block);
-      node.title = "Ankreuzen";
+      const manualCheckbox = isManualCheckboxBlock(block);
+      if (manualCheckbox && renderMark) {
+        node.classList.add("manual-checkbox-checked");
+      }
+      node.title = manualCheckbox ? "Kreuzfeld" : "Ankreuzen";
+      node.tabIndex = manualCheckbox ? 0 : node.tabIndex;
       node.setAttribute("role", "checkbox");
       node.setAttribute("aria-checked", block.currentText.trim() ? "true" : "false");
       const mark = document.createElement("div");
@@ -2052,12 +3028,67 @@ function renderTextLayer() {
       node.addEventListener("mousedown", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        if (isManualOverlayBlock(block)) {
+          state.selectedBlockId = block.id;
+          state.editingBlockId = null;
+          syncSelectedBlock();
+          node.focus({ preventScroll: true });
+          beginPotentialDrag(block, node, event);
+        }
       });
       node.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        if (state.suppressClickBlockId === block.id) {
+          state.suppressClickBlockId = null;
+          return;
+        }
+        const eventTarget = event.target instanceof HTMLElement ? event.target : null;
+        if (eventTarget?.closest(".resize-handle, .rotate-handle")) {
+          return;
+        }
+        if (manualCheckbox) {
+          state.selectedBlockId = block.id;
+          state.editingBlockId = null;
+          syncSelectedBlock();
+          node.focus({ preventScroll: true });
+          return;
+        }
         toggleCheckbox(block);
       });
+      el.textLayer.appendChild(node);
+      continue;
+    }
+
+    if (isManualCoverBlock(block)) {
+      node.title = "Weiße Fläche";
+      node.tabIndex = 0;
+      node.addEventListener("mousedown", (event) => {
+        if (event.button !== 0) {
+          return;
+        }
+        state.selectedBlockId = block.id;
+        state.editingBlockId = null;
+        syncSelectedBlock();
+        node.focus({ preventScroll: true });
+        beginPotentialDrag(block, node, event);
+      });
+      node.addEventListener("click", (event) => {
+        if (state.suppressClickBlockId === block.id) {
+          state.suppressClickBlockId = null;
+          event.preventDefault();
+          return;
+        }
+        const eventTarget = event.target instanceof HTMLElement ? event.target : null;
+        if (eventTarget?.closest(".resize-handle, .rotate-handle")) {
+          return;
+        }
+        state.selectedBlockId = block.id;
+        state.editingBlockId = null;
+        syncSelectedBlock();
+        node.focus({ preventScroll: true });
+      });
+      appendManualTransformHandles(node, block);
       el.textLayer.appendChild(node);
       continue;
     }
@@ -2364,19 +3395,22 @@ function renderTextLayer() {
     const editor = document.createElement("div");
     editor.className = "text-editor";
     editor.spellcheck = false;
-    editor.contentEditable = "plaintext-only";
+    editor.contentEditable = isManualTextBlock(block) && state.editingBlockId !== block.id ? "false" : "plaintext-only";
     if (block.currentText) {
       editor.textContent = block.currentText;
     } else {
       ensureEditablePlaceholder(editor);
     }
     editor.style.fontFamily = block.cssFontFamily;
-    editor.style.fontWeight = isContractIdNumberBlock(block) ? "700" : (block.fontWeight || "400");
+    editor.style.fontWeight = isContractIdNumberBlock(block) ? "700" : getManualDisplayFontWeight(block);
     editor.style.fontStyle = block.fontStyle || "normal";
     editor.style.fontSize = `${block.fontSize * scale}px`;
     editor.style.lineHeight = `${block.lineHeight * scale}px`;
     editor.style.color = block.color;
     editor.style.textAlign = block.align;
+    editor.style.textDecoration = String(block.textDecoration || "").toLowerCase() === "underline" ? "underline" : "none";
+    editor.style.textDecorationThickness = getTextDecorationThickness(block, scale);
+    editor.style.textUnderlineOffset = String(block.textDecoration || "").toLowerCase() === "underline" ? "0.08em" : "";
     let contractIdUnderline = null;
     if (isContractIdNumberBlock(block)) {
       editor.style.textDecoration = "none";
@@ -2384,9 +3418,15 @@ function renderTextLayer() {
       contractIdUnderline.className = "contract-id-underline";
       syncContractIdUnderline(contractIdUnderline, block, scale);
     }
+    syncManualTextEditorBox(editor, block, scale);
 
     editor.addEventListener("focus", () => {
       state.selectedBlockId = block.id;
+      rememberManualTextBlock(block);
+      if (isManualTextBlock(block)) {
+        state.editingBlockId = block.id;
+        editor.contentEditable = "plaintext-only";
+      }
       if (!block.currentText) {
         ensureEditablePlaceholder(editor);
         requestAnimationFrame(() => {
@@ -2401,12 +3441,21 @@ function renderTextLayer() {
       }
     });
 
-    editor.addEventListener("mousedown", () => {
+    editor.addEventListener("mousedown", (event) => {
       state.selectedBlockId = block.id;
+      rememberManualTextBlock(block);
       syncSelectedBlock();
+      if (isManualTextBlock(block) && state.editingBlockId !== block.id) {
+        event.preventDefault();
+        beginPotentialDrag(block, node, event);
+      }
     });
 
     editor.addEventListener("keydown", (event) => {
+      if (handleDeleteForEmptyManualTextBlock(event)) {
+        return;
+      }
+
       if (!block.isCustom || event.key !== "Enter" || event.shiftKey) {
         return;
       }
@@ -2420,6 +3469,7 @@ function renderTextLayer() {
 
     editor.addEventListener("input", () => {
       block.currentText = readEditableText(editor);
+      block.currentValue = block.currentText;
       autoSizeTextBlock(node, editor, block, scale);
       if (contractIdUnderline) {
         syncContractIdUnderline(contractIdUnderline, block, scale);
@@ -2429,6 +3479,13 @@ function renderTextLayer() {
 
     editor.addEventListener("blur", () => {
       block.currentText = readEditableText(editor);
+      block.currentValue = block.currentText;
+      commitDocumentHistory();
+      if (isManualTextBlock(block) && state.editingBlockId === block.id) {
+        state.editingBlockId = null;
+        editor.contentEditable = "false";
+        syncSelectedBlock();
+      }
       if (!block.currentText) {
         ensureEditablePlaceholder(editor);
       }
@@ -2437,12 +3494,40 @@ function renderTextLayer() {
       }
     });
 
+    if (isManualTextBlock(block)) {
+      node.addEventListener("click", (event) => {
+        if (state.suppressClickBlockId === block.id) {
+          state.suppressClickBlockId = null;
+          event.preventDefault();
+          return;
+        }
+        const eventTarget = event.target instanceof HTMLElement ? event.target : null;
+        if (eventTarget?.closest(".delete-handle, .resize-handle, .rotate-handle")) {
+          return;
+        }
+        const wasEditing = state.editingBlockId === block.id;
+        state.selectedBlockId = block.id;
+        state.editingBlockId = block.id;
+        rememberManualTextBlock(block);
+        editor.contentEditable = "plaintext-only";
+        syncSelectedBlock();
+        if (!wasEditing) {
+          requestAnimationFrame(() => {
+            focusEditableTarget(editor);
+          });
+        }
+      });
+    }
+
     node.appendChild(editor);
     if (contractIdUnderline) {
       node.appendChild(contractIdUnderline);
     }
     el.textLayer.appendChild(node);
-    if (block.isCustom) {
+    if (isManualTextBlock(block)) {
+      appendManualTransformHandles(node, block);
+    }
+    if (block.isCustom && !isManualOverlayBlock(block)) {
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
       deleteButton.className = "delete-handle";
@@ -2498,6 +3583,7 @@ async function saveDraft() {
     return;
   }
 
+  syncDocumentBlockValues();
   const payload = {
     fields: state.document.fields,
   };
@@ -2519,7 +3605,7 @@ async function saveLearnedTemplate() {
     return;
   }
   if (!hasManualTemplateFields()) {
-    throw new Error("Bitte zuerst per Rechtsklick die benötigten Felder setzen.");
+    throw new Error("Bitte zuerst die benötigten Felder setzen.");
   }
 
   const templateName = getTemplateNameValue();
@@ -2604,12 +3690,18 @@ async function applyImportedDocument(documentModel) {
   state.document = ensureDocumentFieldCompatibility(documentModel);
   state.currentPage = 1;
   state.selectedBlockId = null;
+  state.editingBlockId = null;
+  state.activePdfTool = "select";
   state.lastExportPath = null;
+  state.backgroundLoadToken += 1;
+  state.renderedBackgroundPage = null;
+  state.renderedBackgroundUrl = "";
   if (el.templateNameInput) {
     el.templateNameInput.value = getDefaultTemplateName();
   }
   injectFontFaces();
   showSupportStatus();
+  resetDocumentHistory();
 
   if (!state.document.supportStatus.supported) {
     el.backgroundImage.removeAttribute("src");
@@ -2629,7 +3721,7 @@ async function applyImportedDocument(documentModel) {
   updateButtons();
   updateMeta();
   await loadBackground();
-  setStatus("PDF geladen.");
+  setStatus("PDF geladen. Werkzeug wählen und weiße Felder direkt auf die Seite setzen.");
 }
 
 async function exportPdf() {
@@ -2711,7 +3803,7 @@ el.templateLearningButton.addEventListener("click", () => {
   setTemplateLearningActive(nextState);
   setStatus(
     nextState
-      ? "Lernmodus aktiv. Felder per Rechtsklick setzen und danach die Vorlage speichern."
+      ? "Lernmodus aktiv. Felder setzen und danach die Vorlage speichern."
       : "Lernmodus beendet.",
   );
 });
@@ -2741,6 +3833,14 @@ el.webPdfInput.addEventListener("change", async () => {
   }
 });
 
+el.undoButton.addEventListener("click", async () => {
+  await moveDocumentHistory(-1);
+});
+
+el.redoButton.addEventListener("click", async () => {
+  await moveDocumentHistory(1);
+});
+
 el.prevButton.addEventListener("click", async () => {
   state.currentPage -= 1;
   state.selectedBlockId = null;
@@ -2757,19 +3857,22 @@ el.nextButton.addEventListener("click", async () => {
 
 el.zoomOutButton.addEventListener("click", async () => {
   state.zoom = clamp(state.zoom / 1.15, 0.25, 4);
-  await loadBackground();
+  updateButtons();
+  await loadBackground({ preserveCurrent: true });
   updateButtons();
 });
 
 el.zoomFitButton.addEventListener("click", async () => {
   state.zoom = state.fitZoom;
-  await loadBackground();
+  updateButtons();
+  await loadBackground({ preserveCurrent: true });
   updateButtons();
 });
 
 el.zoomInButton.addEventListener("click", async () => {
   state.zoom = clamp(state.zoom * 1.15, 0.25, 4);
-  await loadBackground();
+  updateButtons();
+  await loadBackground({ preserveCurrent: true });
   updateButtons();
 });
 
@@ -2781,6 +3884,58 @@ el.saveDraftButton.addEventListener("click", async () => {
     console.error(error);
     setStatus(error.message);
   }
+});
+
+el.selectToolButton?.addEventListener("click", () => {
+  setActivePdfTool("select");
+  setStatus("Auswahl aktiv.");
+});
+
+el.addTextButton?.addEventListener("click", () => {
+  setActivePdfTool("text");
+  setStatus("Text hinzufügen aktiv. Auf die PDF klicken, um ein weißes Textfeld zu setzen.");
+});
+
+el.fontFamilySelect?.addEventListener("change", () => {
+  applyManualTextStylePatch({ fontFamily: el.fontFamilySelect.value });
+});
+
+el.fontSizeInput?.addEventListener("change", () => {
+  applyManualTextStylePatch({ fontSize: el.fontSizeInput.value });
+});
+
+el.boldButton?.addEventListener("click", () => {
+  const style = getActiveManualTextStyleSource();
+  applyManualTextStylePatch({ fontWeight: isBoldFontWeight(style.fontWeight) ? "400" : "700" });
+});
+
+el.italicButton?.addEventListener("click", () => {
+  const style = getActiveManualTextStyleSource();
+  applyManualTextStylePatch({
+    fontStyle: String(style.fontStyle || "").toLowerCase() === "italic" ? "normal" : "italic",
+  });
+});
+
+el.underlineButton?.addEventListener("click", () => {
+  const style = getActiveManualTextStyleSource();
+  applyManualTextStylePatch({
+    textDecoration: String(style.textDecoration || "").toLowerCase() === "underline" ? "none" : "underline",
+  });
+});
+
+el.eraseTextButton?.addEventListener("click", () => {
+  setActivePdfTool("erase");
+  setStatus("Text löschen aktiv. Auf die PDF klicken, um eine weiße Fläche zu setzen.");
+});
+
+el.checkButton?.addEventListener("click", () => {
+  setActivePdfTool("check");
+  setStatus("Ankreuzen aktiv. Auf die Box klicken, um ein weißes Feld mit Kreuz zu setzen.");
+});
+
+el.uncheckButton?.addEventListener("click", () => {
+  setActivePdfTool("uncheck");
+  setStatus("Kreuz löschen aktiv. Auf die Box klicken, um sie weiß zu überdecken.");
 });
 
 el.exportButton.addEventListener("click", async () => {
@@ -2918,20 +4073,31 @@ window.addEventListener("blur", () => {
 });
 
 el.pageContainer.addEventListener("contextmenu", (event) => {
-  if (!state.document?.supportStatus?.supported || el.pageContainer.hidden) {
-    return;
+  if (state.activePdfTool && state.activePdfTool !== "select") {
+    event.preventDefault();
   }
-  event.preventDefault();
-  createCustomTextBlock(event);
 });
 
 el.pageContainer.addEventListener("click", (event) => {
-  if (!state.document?.supportStatus?.supported || el.pageContainer.hidden || !isScanTemplateDocument()) {
+  if (!state.document?.supportStatus?.supported || el.pageContainer.hidden) {
+    return;
+  }
+  if (event.button !== 0) {
     return;
   }
 
   const target = event.target;
   if (!(target instanceof Element) || target.closest(".text-block")) {
+    return;
+  }
+
+  if (state.activePdfTool && state.activePdfTool !== "select") {
+    event.preventDefault();
+    createManualOverlayBlock(event, state.activePdfTool);
+    return;
+  }
+
+  if (!isScanTemplateDocument()) {
     return;
   }
 
@@ -2962,6 +4128,10 @@ window.addEventListener("mousedown", (event) => {
     return;
   }
 
+  if (target.closest("#toolbar")) {
+    return;
+  }
+
   if (state.drag || state.resize) {
     return;
   }
@@ -2971,9 +4141,21 @@ window.addEventListener("mousedown", (event) => {
 
 window.addEventListener("mousemove", handleResizeMove);
 window.addEventListener("mousemove", handleDragMove);
+window.addEventListener("mousemove", handleRotateMove);
 window.addEventListener("mouseup", handleDragEnd);
 
+document.addEventListener("keydown", handleDeleteForSelectedManualOverlayBlock, true);
+document.addEventListener("keydown", handleDeleteForEmptyManualTextBlock, true);
+
 window.addEventListener("keydown", (event) => {
+  if (handleDeleteForSelectedManualOverlayBlock(event)) {
+    return;
+  }
+
+  if (handleDeleteForEmptyManualTextBlock(event)) {
+    return;
+  }
+
   if (event.key === "Escape") {
     const active = document.activeElement;
     if (
