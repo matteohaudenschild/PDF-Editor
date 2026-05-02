@@ -129,6 +129,7 @@ const el = {
   updateMessage: document.getElementById("updateMessage"),
   updateInstallButton: document.getElementById("updateInstallButton"),
   updateDismissButton: document.getElementById("updateDismissButton"),
+  appVersion: document.getElementById("appVersion"),
   status: document.getElementById("status"),
   meta: document.getElementById("meta"),
   errors: document.getElementById("errors"),
@@ -3781,6 +3782,14 @@ async function exportPdfDownload() {
 }
 
 async function initialize() {
+  if (el.appVersion && isDesktopRuntime() && typeof window.desktopAPI?.getAppVersion === "function") {
+    try {
+      const appVersion = await window.desktopAPI.getAppVersion();
+      el.appVersion.textContent = appVersion ? `v${appVersion}` : "";
+    } catch (error) {
+      console.warn("App version could not be loaded:", error);
+    }
+  }
   state.serviceBaseUrl = isDesktopRuntime()
     ? await window.desktopAPI.getServiceBaseUrl()
     : window.location.origin;
