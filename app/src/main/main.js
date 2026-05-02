@@ -140,7 +140,9 @@ async function githubRequestJson(url) {
 
 function findInstallerAsset(release) {
   const assets = Array.isArray(release?.assets) ? release.assets : [];
-  return assets.find((asset) => asset?.name === UPDATE_ASSET_NAME)
+  const normalizeAssetName = (value) => String(value || "").toLowerCase().replace(/[\s._-]+/g, "");
+  const expectedName = normalizeAssetName(UPDATE_ASSET_NAME);
+  return assets.find((asset) => normalizeAssetName(asset?.name) === expectedName)
     || assets.find((asset) => String(asset?.name || "").toLowerCase().endsWith(".exe"));
 }
 
@@ -180,8 +182,13 @@ async function getLatestUpdateInfo() {
 }
 
 function downloadFile(url, targetPath, redirectCount = 0) {
+  const partialPath = `${targetPath}.download`;
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    if (redirectCount === 0) {
+      fs.rmSync(targetPath, { force: true });
+      fs.rmSync(partialPath, { force: true });
+    }
     const request = https.get(
       url,
       {
@@ -204,18 +211,29 @@ function downloadFile(url, targetPath, redirectCount = 0) {
         if (response.statusCode < 200 || response.statusCode >= 300) {
           response.resume();
           fs.rm(targetPath, { force: true }, () => {});
+          fs.rm(partialPath, { force: true }, () => {});
           reject(new Error(`Update-Download fehlgeschlagen: HTTP ${response.statusCode}`));
           return;
         }
 
-        const file = fs.createWriteStream(targetPath);
+        const file = fs.createWriteStream(partialPath);
         response.pipe(file);
         file.on("finish", () => {
-          file.close(() => resolve(targetPath));
+          file.close(() => {
+            try {
+              fs.renameSync(partialPath, targetPath);
+              resolve(targetPath);
+            } catch (error) {
+              fs.rm(targetPath, { force: true }, () => {});
+              fs.rm(partialPath, { force: true }, () => {});
+              reject(error);
+            }
+          });
         });
         file.on("error", (error) => {
           request.destroy();
           fs.rm(targetPath, { force: true }, () => {});
+          fs.rm(partialPath, { force: true }, () => {});
           reject(error);
         });
       },
@@ -226,6 +244,7 @@ function downloadFile(url, targetPath, redirectCount = 0) {
     });
     request.on("error", (error) => {
       fs.rm(targetPath, { force: true }, () => {});
+      fs.rm(partialPath, { force: true }, () => {});
       reject(error);
     });
   });

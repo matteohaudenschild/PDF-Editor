@@ -243,7 +243,10 @@ async function installAvailableUpdate() {
     console.error(error);
     state.updateInstalling = false;
     updateUpdateBanner();
-    setStatus(error.message || "Update konnte nicht installiert werden.");
+    const fallbackText = state.updateInfo?.releaseUrl
+      ? ` Bitte lade die neueste Version manuell: ${state.updateInfo.releaseUrl}`
+      : "";
+    setStatus(`${error.message || "Update konnte nicht installiert werden."}${fallbackText}`);
   }
 }
 
