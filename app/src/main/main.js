@@ -182,7 +182,6 @@ async function getLatestUpdateInfo() {
 function downloadFile(url, targetPath, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    const file = fs.createWriteStream(targetPath);
     const request = https.get(
       url,
       {
@@ -193,7 +192,6 @@ function downloadFile(url, targetPath, redirectCount = 0) {
       (response) => {
         const location = response.headers.location;
         if (response.statusCode >= 300 && response.statusCode < 400 && location) {
-          file.close(() => fs.rm(targetPath, { force: true }, () => {}));
           response.resume();
           if (redirectCount >= 5) {
             reject(new Error("Zu viele Weiterleitungen beim Update-Download."));
@@ -204,15 +202,21 @@ function downloadFile(url, targetPath, redirectCount = 0) {
         }
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          file.close(() => fs.rm(targetPath, { force: true }, () => {}));
           response.resume();
+          fs.rm(targetPath, { force: true }, () => {});
           reject(new Error(`Update-Download fehlgeschlagen: HTTP ${response.statusCode}`));
           return;
         }
 
+        const file = fs.createWriteStream(targetPath);
         response.pipe(file);
         file.on("finish", () => {
           file.close(() => resolve(targetPath));
+        });
+        file.on("error", (error) => {
+          request.destroy();
+          fs.rm(targetPath, { force: true }, () => {});
+          reject(error);
         });
       },
     );
@@ -221,11 +225,6 @@ function downloadFile(url, targetPath, redirectCount = 0) {
       request.destroy(new Error("Update-Download hat zu lange gedauert."));
     });
     request.on("error", (error) => {
-      file.close(() => fs.rm(targetPath, { force: true }, () => {}));
-      reject(error);
-    });
-    file.on("error", (error) => {
-      request.destroy();
       fs.rm(targetPath, { force: true }, () => {});
       reject(error);
     });
