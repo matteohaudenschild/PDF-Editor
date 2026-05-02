@@ -16,6 +16,7 @@ const state = {
   autoSaveTimer: null,
   updateInfo: null,
   updateInstalling: false,
+  autoUpdateStarted: false,
   backgroundLoadToken: 0,
   renderedBackgroundPage: null,
   renderedBackgroundUrl: "",
@@ -198,15 +199,16 @@ function updateUpdateBanner() {
   }
 
   const sizeText = info.assetSize ? ` (${formatBytes(info.assetSize)})` : "";
-  el.updateMessage.textContent =
-    `Update ${info.latestVersion} ist verfügbar${sizeText}. Deine installierte Version ist ${info.currentVersion}.`;
+  el.updateMessage.textContent = state.updateInstalling
+    ? `Update ${info.latestVersion} wird installiert${sizeText}. Die App startet danach neu.`
+    : `Update ${info.latestVersion} ist verfuegbar${sizeText}. Deine installierte Version ist ${info.currentVersion}.`;
   el.updateInstallButton.disabled = state.updateInstalling;
   el.updateInstallButton.textContent = state.updateInstalling
-    ? "Update wird vorbereitet..."
+    ? "Laeuft..."
     : "Jetzt installieren";
 }
 
-async function checkForAppUpdates() {
+async function checkForAppUpdates({ autoInstall = false } = {}) {
   if (!isDesktopRuntime() || typeof window.desktopAPI?.checkForUpdates !== "function") {
     return;
   }
@@ -217,28 +219,38 @@ async function checkForAppUpdates() {
   }
   state.updateInfo = info;
   updateUpdateBanner();
+  if (autoInstall && info?.available && !state.autoUpdateStarted && !hasEditableDocument()) {
+    state.autoUpdateStarted = true;
+    setTimeout(() => {
+      installAvailableUpdate({ automatic: true }).catch((error) => {
+        console.warn("Automatic update install failed:", error);
+      });
+    }, 600);
+  }
 }
 
-async function installAvailableUpdate() {
+async function installAvailableUpdate({ automatic = false } = {}) {
   if (!state.updateInfo?.available || state.updateInstalling) {
     return;
   }
-  const confirmed = window.confirm(
-    "Das Update wird heruntergeladen, der Installer startet und die App schliesst sich danach. Jetzt fortfahren?",
-  );
-  if (!confirmed) {
-    return;
+  if (!automatic) {
+    const confirmed = window.confirm(
+      "Das Update wird heruntergeladen, der Installer startet und die App schliesst sich danach. Jetzt fortfahren?",
+    );
+    if (!confirmed) {
+      return;
+    }
   }
 
   state.updateInstalling = true;
   updateUpdateBanner();
-  setStatus("Update wird heruntergeladen...");
+  setStatus(automatic ? "Update wird automatisch heruntergeladen..." : "Update wird heruntergeladen...");
   try {
     if (hasEditableDocument()) {
       await saveDraft();
     }
     await window.desktopAPI.installUpdate();
-    setStatus("Update-Installer wurde gestartet.");
+    setStatus("Update-Installer wurde gestartet. Die App schliesst sich gleich.");
   } catch (error) {
     console.error(error);
     state.updateInstalling = false;
@@ -3777,7 +3789,7 @@ async function initialize() {
   setWhiteboardMode("pen");
   updateButtons();
   updateMeta();
-  checkForAppUpdates().catch((error) => {
+  checkForAppUpdates({ autoInstall: true }).catch((error) => {
     console.warn("Update check failed:", error);
   });
 }

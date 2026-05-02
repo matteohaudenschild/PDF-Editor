@@ -239,7 +239,7 @@ function downloadFile(url, targetPath, redirectCount = 0) {
       },
     );
 
-    request.setTimeout(120000, () => {
+    request.setTimeout(600000, () => {
       request.destroy(new Error("Update-Download hat zu lange gedauert."));
     });
     request.on("error", (error) => {
@@ -271,7 +271,7 @@ async function downloadAndInstallLatestUpdate() {
     }
   }
 
-  const installer = spawn(installerPath, [], {
+  const installer = spawn(installerPath, ["--auto-update", "--wait-pid", String(process.pid)], {
     detached: true,
     stdio: "ignore",
     windowsHide: false,

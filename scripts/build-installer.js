@@ -185,11 +185,39 @@ using System.Windows.Forms;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        var autoUpdate = HasFlag(args, "--auto-update") || HasFlag(args, "/auto-update");
+        var waitPid = GetWaitPid(args);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new InstallerForm());
+        Application.Run(new InstallerForm(autoUpdate, waitPid));
+    }
+
+    private static bool HasFlag(string[] args, string flag)
+    {
+        foreach (var arg in args)
+        {
+            if (string.Equals(arg, flag, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int? GetWaitPid(string[] args)
+    {
+        for (var index = 0; index < args.Length - 1; index++)
+        {
+            int pid;
+            if (string.Equals(args[index], "--wait-pid", StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(args[index + 1], out pid))
+            {
+                return pid;
+            }
+        }
+        return null;
     }
 }
 
@@ -204,12 +232,17 @@ internal sealed class InstallerForm : Form
     private readonly Label _statusLabel;
     private readonly ProgressBar _progressBar;
 
+    private readonly bool _autoUpdate;
+    private readonly int? _waitPid;
     private bool _allowClose;
     private bool _started;
 
-    public InstallerForm()
+    public InstallerForm(bool autoUpdate, int? waitPid)
     {
-        Text = AppName + " Setup";
+        _autoUpdate = autoUpdate;
+        _waitPid = waitPid;
+
+        Text = AppName + (_autoUpdate ? " Update" : " Setup");
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -223,7 +256,7 @@ internal sealed class InstallerForm : Form
             Top = 18,
             Width = 484,
             Height = 26,
-            Text = AppName + " wird installiert",
+            Text = AppName + (_autoUpdate ? " wird aktualisiert" : " wird installiert"),
             Font = new Font("Segoe UI", 12F, FontStyle.Bold, GraphicsUnit.Point),
         };
         Controls.Add(_titleLabel);
@@ -259,26 +292,41 @@ internal sealed class InstallerForm : Form
 
         _started = true;
         var installDir = GetInstallDirectory();
-        var decision = MessageBox.Show(
-            this,
-            "Die App wird nach\\n\\n" + installDir + "\\n\\ninstalliert.\\n"
-            + "Die benoetigte Python-Laufzeit ist im Installer enthalten. Falls sie fehlt oder beschaedigt ist, versucht der Installer sie ersatzweise von python.org zu laden.\\n\\nFortfahren?",
-            AppName + " Setup",
-            MessageBoxButtons.OKCancel,
-            MessageBoxIcon.Information
-        );
-
-        if (decision != DialogResult.OK)
+        if (!_autoUpdate)
         {
-            _allowClose = true;
-            Close();
-            return;
+            var decision = MessageBox.Show(
+                this,
+                "Die App wird nach\\n\\n" + installDir + "\\n\\ninstalliert.\\n"
+                + "Die benoetigte Python-Laufzeit ist im Installer enthalten. Falls sie fehlt oder beschaedigt ist, versucht der Installer sie ersatzweise von python.org zu laden.\\n\\nFortfahren?",
+                AppName + " Setup",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Information
+            );
+
+            if (decision != DialogResult.OK)
+            {
+                _allowClose = true;
+                Close();
+                return;
+            }
         }
 
         try
         {
+            if (_autoUpdate)
+            {
+                await WaitForPreviousAppAsync();
+            }
+
             await InstallAsync(installDir);
             _allowClose = true;
+
+            if (_autoUpdate)
+            {
+                LaunchApp(installDir);
+                Close();
+                return;
+            }
 
             var launchNow = MessageBox.Show(
                 this,
@@ -318,6 +366,31 @@ internal sealed class InstallerForm : Form
         }
 
         base.OnFormClosing(e);
+    }
+
+    private async Task WaitForPreviousAppAsync()
+    {
+        if (!_waitPid.HasValue)
+        {
+            await Task.Delay(1200);
+            return;
+        }
+
+        try
+        {
+            var process = Process.GetProcessById(_waitPid.Value);
+            SetMarqueeStatus("Alte App wird geschlossen...");
+            var started = DateTime.UtcNow;
+            while (!process.HasExited && DateTime.UtcNow - started < TimeSpan.FromSeconds(45))
+            {
+                await Task.Delay(250);
+                process.Refresh();
+            }
+        }
+        catch
+        {
+            System.Threading.Thread.Sleep(600);
+        }
     }
 
     private async Task InstallAsync(string installDir)
@@ -495,8 +568,33 @@ internal sealed class InstallerForm : Form
             var relative = file.Substring(sourceDir.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var targetPath = Path.Combine(targetDir, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath) ?? targetDir);
-            File.Copy(file, targetPath, true);
+            CopyFileWithRetry(file, targetPath);
         }
+    }
+
+    private static void CopyFileWithRetry(string sourcePath, string targetPath)
+    {
+        Exception lastError = null;
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            try
+            {
+                File.Copy(sourcePath, targetPath, true);
+                return;
+            }
+            catch (IOException ex)
+            {
+                lastError = ex;
+                System.Threading.Thread.Sleep(250);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                lastError = ex;
+                System.Threading.Thread.Sleep(250);
+            }
+        }
+
+        throw new IOException("Eine App-Datei konnte nicht ersetzt werden: " + targetPath, lastError);
     }
 
     private static string GetInstallDirectory()
