@@ -7206,43 +7206,91 @@ def _is_manual_overlay_session(session: DocumentSession) -> bool:
     return MANUAL_IMAGE_OVERLAY_MODE and session.model.documentClass == "manual-image-overlay"
 
 
+def _is_ink_signature_block(block: TextBlock) -> bool:
+    return block.isCustom and (
+        str(block.groupKind or "") == "ink-signature"
+        or str(block.fieldType or "") == "ink-signature"
+    )
+
+
 def _is_manual_overlay_block(block: TextBlock) -> bool:
-    return block.isCustom and str(block.groupKind or "").startswith("manual-")
+    return block.isCustom and (str(block.groupKind or "").startswith("manual-") or _is_ink_signature_block(block))
 
 
 def _is_manual_text_block(block: TextBlock) -> bool:
     return _is_manual_overlay_block(block) and str(block.groupKind or "") == "manual-text"
 
 
-def _is_manual_signature_block(block: TextBlock) -> bool:
-    return _is_manual_overlay_block(block) and str(block.groupKind or "") == "manual-signature"
+def _ink_signature_points(stroke: object) -> list[tuple[float, float]]:
+    if not isinstance(stroke, dict):
+        return []
+    raw_points = stroke.get("points")
+    if not isinstance(raw_points, list):
+        return []
+    points: list[tuple[float, float]] = []
+    for point in raw_points:
+        if not isinstance(point, dict):
+            continue
+        try:
+            x = float(point.get("x"))
+            y = float(point.get("y"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            points.append((x, y))
+    return points
 
 
-def _decode_manual_signature_image(block: TextBlock) -> Optional[bytes]:
-    data_url = str(block.imageDataUrl or "")
-    if not data_url.startswith("data:image/png;base64,"):
-        return None
+def _ink_signature_stroke_width(stroke: object) -> float:
+    if not isinstance(stroke, dict):
+        return 1.0
     try:
-        return base64.b64decode(data_url.split(",", 1)[1], validate=True)
-    except Exception:
-        return None
+        width = float(stroke.get("width"))
+    except (TypeError, ValueError):
+        width = 1.0
+    return max(0.1, min(width, 48.0))
 
 
-def _draw_manual_signature_overlay(page: pymupdf.Page, block: TextBlock) -> None:
-    if block.bbox is None:
+def _draw_ink_signature_block(page: pymupdf.Page, block: TextBlock) -> None:
+    payload = block.inkPayload if isinstance(block.inkPayload, dict) else {}
+    strokes = payload.get("strokes") if isinstance(payload, dict) else []
+    if not isinstance(strokes, list):
         return
-    image_bytes = _decode_manual_signature_image(block)
-    if not image_bytes:
-        return
-    rect = pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1) & page.rect
-    if rect.is_empty:
-        return
-    page.insert_image(
-        rect,
-        stream=image_bytes,
-        keep_proportion=False,
-        overlay=True,
-    )
+
+    def pdf_point(x: float, y: float) -> pymupdf.Point:
+        if page.rotation:
+            return _rotated_visual_point(page, x, y)
+        return pymupdf.Point(x, y)
+
+    for stroke in strokes:
+        points = _ink_signature_points(stroke)
+        if not points:
+            continue
+        try:
+            raw_color = stroke.get("color") if isinstance(stroke, dict) else None
+            color = _hex_to_pdf_color(str(raw_color or block.color or "#000000"))
+        except Exception:
+            color = (0, 0, 0)
+        width = _ink_signature_stroke_width(stroke)
+        if len(points) == 1:
+            x, y = points[0]
+            radius = max(width / 2, 0.2)
+            page.draw_line(
+                pdf_point(x - radius, y),
+                pdf_point(x + radius, y),
+                color=color,
+                width=width,
+                overlay=True,
+            )
+            continue
+        for start, end in zip(points, points[1:]):
+            page.draw_line(
+                pdf_point(start[0], start[1]),
+                pdf_point(end[0], end[1]),
+                color=color,
+                width=width,
+                overlay=True,
+            )
 
 
 def _manual_text_descender_padding(font_size: float) -> float:
@@ -7296,7 +7344,7 @@ def _manual_overlay_cover_rect(block: TextBlock, page_rect: pymupdf.Rect) -> pym
 def _draw_manual_overlay_cover(page: pymupdf.Page, block: TextBlock) -> None:
     if block.bbox is None:
         return
-    if _is_manual_signature_block(block):
+    if _is_ink_signature_block(block):
         return
     if str(block.groupKind or "") == "manual-text" and not (block.currentText or "").strip():
         return
@@ -7379,8 +7427,8 @@ def _write_block_text(
     page_font_aliases: set[str],
     measurement_fonts: dict[str, pymupdf.Font],
 ) -> None:
-    if _is_manual_signature_block(block):
-        _draw_manual_signature_overlay(page, block)
+    if _is_ink_signature_block(block):
+        _draw_ink_signature_block(page, block)
         return
 
     if page.rotation:
@@ -7854,6 +7902,8 @@ def _draw_line_overlays_on_page(page: pymupdf.Page, line_overlays: list[LineOver
 
 
 def _should_write_reconstructed_block(block: TextBlock) -> bool:
+    if _is_ink_signature_block(block):
+        return True
     if block.groupKind.startswith("hidden-") or block.groupKind == "source-overlay-hidden":
         return False
     if not block.currentText.strip() and not block.isCheckbox:
@@ -7935,6 +7985,8 @@ def _export_manual_image_overlay_document(session: DocumentSession, target_path:
             page_font_aliases: set[str] = set()
             measurement_fonts: dict[str, pymupdf.Font] = {}
             for block in page_blocks:
+                if _is_ink_signature_block(block):
+                    continue
                 if block.isCheckbox:
                     continue
                 if not block.currentText.strip() and not block.isCheckbox:
@@ -7951,6 +8003,9 @@ def _export_manual_image_overlay_document(session: DocumentSession, target_path:
                     page_font_aliases,
                     measurement_fonts,
                 )
+            for block in page_blocks:
+                if _is_ink_signature_block(block):
+                    _draw_ink_signature_block(output_page, block)
 
         session_payload = _embedded_session_payload(session.model, page_hashes=_page_hashes(output_doc))
         _write_embedded_session(output_doc, session_payload)
@@ -8086,6 +8141,9 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
                                     _scan_replacement_rect(block, output_page.rect),
                                 )
                     for block in page_blocks:
+                        if _is_ink_signature_block(block):
+                            _draw_ink_signature_block(output_page, block)
+                            continue
                         if not block.currentText.strip() and not block.isCheckbox:
                             continue
                         runtime = session.font_runtimes.get(block.fontAssetId or "")
@@ -8142,6 +8200,9 @@ def export_document(session: DocumentSession, target_path: Optional[Path] = None
                 )
 
                 for block in page_blocks:
+                    if _is_ink_signature_block(block):
+                        _draw_ink_signature_block(output_page, block)
+                        continue
                     if not block.currentText.strip() and not block.isCheckbox:
                         continue
 

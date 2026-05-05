@@ -53,7 +53,12 @@ const state = {
   },
   signature: {
     active: false,
-    returnTool: "select",
+    isDrawing: false,
+    lastPoint: null,
+    pointerId: null,
+    currentStroke: null,
+    color: "#000000",
+    penSize: 3,
   },
 };
 
@@ -70,11 +75,12 @@ const MANUAL_COVER_DEFAULT_HEIGHT = 11;
 const MANUAL_OVERLAY_MIN_SIZE = 1;
 const MANUAL_CHECKBOX_SIZE = 9;
 const MANUAL_CHECKBOX_MIN_SIZE = 6;
-const MANUAL_SIGNATURE_MIN_WIDTH = 24;
-const MANUAL_SIGNATURE_MIN_HEIGHT = 10;
 const DRAG_THRESHOLD_PX = 4;
 const WHITEBOARD_HISTORY_LIMIT = 30;
 const DOCUMENT_HISTORY_LIMIT = 80;
+const SIGNATURE_DEFAULT_PEN_SIZE = 3;
+const SIGNATURE_MAX_PEN_SIZE = 18;
+const SIGNATURE_MIN_STROKE_WIDTH = 0.1;
 const MANUAL_TEXT_FONT_OPTIONS = [
   {
     value: "Helvetica",
@@ -109,8 +115,6 @@ const el = {
   whiteboardClearButton: document.getElementById("whiteboardClearButton"),
   whiteboardUndoButton: document.getElementById("whiteboardUndoButton"),
   whiteboardRedoButton: document.getElementById("whiteboardRedoButton"),
-  signatureInsertButton: document.getElementById("signatureInsertButton"),
-  signatureCancelButton: document.getElementById("signatureCancelButton"),
   selectToolButton: document.getElementById("selectToolButton"),
   addTextButton: document.getElementById("addTextButton"),
   fontFamilyLabel: document.getElementById("fontFamilyLabel"),
@@ -124,6 +128,13 @@ const el = {
   checkButton: document.getElementById("checkButton"),
   uncheckButton: document.getElementById("uncheckButton"),
   signatureButton: document.getElementById("signatureButton"),
+  signatureColorLabel: document.getElementById("signatureColorLabel"),
+  signatureColorInput: document.getElementById("signatureColorInput"),
+  signatureThicknessLabel: document.getElementById("signatureThicknessLabel"),
+  signatureThicknessInput: document.getElementById("signatureThicknessInput"),
+  signatureThicknessValue: document.getElementById("signatureThicknessValue"),
+  signatureClearButton: document.getElementById("signatureClearButton"),
+  signatureDoneButton: document.getElementById("signatureDoneButton"),
   undoButton: document.getElementById("undoButton"),
   redoButton: document.getElementById("redoButton"),
   prevButton: document.getElementById("prevButton"),
@@ -150,7 +161,6 @@ const el = {
   backgroundImage: document.getElementById("backgroundImage"),
   textLayer: document.getElementById("textLayer"),
   signatureCanvas: document.getElementById("signatureCanvas"),
-  signatureCursor: document.getElementById("signatureCursor"),
 };
 
 function setStatus(message) {
@@ -1284,6 +1294,10 @@ function syncSelectedBlock() {
     node.classList.toggle("selected", node.dataset.blockId === state.selectedBlockId);
     node.classList.toggle("manual-editing", node.dataset.blockId === state.editingBlockId);
   }
+  const signatureNodes = el.textLayer.querySelectorAll(".signature-block");
+  for (const node of signatureNodes) {
+    node.classList.toggle("selected", node.dataset.blockId === state.selectedBlockId);
+  }
 
   if (state.pendingFocusBlockId) {
     const target = el.textLayer.querySelector(
@@ -1561,8 +1575,15 @@ function isManualCheckboxBlock(block) {
   return isManualOverlayBlock(block) && String(block?.groupKind || "") === "manual-checkbox";
 }
 
-function isManualSignatureBlock(block) {
-  return isManualOverlayBlock(block) && String(block?.groupKind || "") === "manual-signature";
+function isSignatureBlock(block) {
+  const groupKind = String(block?.groupKind || "");
+  const fieldType = String(block?.fieldType || "");
+  return Boolean(block?.isCustom) && (groupKind === "ink-signature" || fieldType === "ink-signature");
+}
+
+function getSignatureStrokes(block) {
+  const payload = block?.inkPayload && typeof block.inkPayload === "object" ? block.inkPayload : null;
+  return Array.isArray(payload?.strokes) ? payload.strokes : [];
 }
 
 function rememberManualTextBlock(block) {
@@ -1597,204 +1618,8 @@ function getManualTextBlockForKeyboard(activeElement = document.activeElement, o
 }
 
 function setActivePdfTool(tool) {
-  state.activePdfTool = ["select", "text", "erase", "check", "uncheck"].includes(tool) ? tool : "select";
+  state.activePdfTool = ["select", "text", "erase", "check", "uncheck", "signature"].includes(tool) ? tool : "select";
   updateButtons();
-}
-
-function isSignatureMode() {
-  return state.signature.active && hasEditableDocument();
-}
-
-function isDrawingSurfaceMode() {
-  return isWhiteboardMode() || isSignatureMode();
-}
-
-function getActiveDrawingCanvas() {
-  return isSignatureMode() ? el.signatureCanvas : el.whiteboardCanvas;
-}
-
-function getActiveDrawingCursor() {
-  return isSignatureMode() ? el.signatureCursor : el.whiteboardCursor;
-}
-
-function enterSignatureMode() {
-  if (!hasEditableDocument()) {
-    return;
-  }
-  clearSelection();
-  state.signature.returnTool = state.activePdfTool || "select";
-  state.signature.active = true;
-  state.activePdfTool = "select";
-  state.whiteboard.mode = "pen";
-  state.whiteboard.color = el.whiteboardColorInput?.value || state.whiteboard.color || "#000000";
-  state.whiteboard.history = [];
-  state.whiteboard.historyIndex = -1;
-  state.whiteboard.hasUncommittedChange = false;
-  document.body.classList.add("signature-mode");
-  resizeWhiteboardCanvas(false);
-  clearWhiteboard(false);
-  updateButtons();
-  updateMeta();
-  setStatus("Unterschrift zeichnen. Scrollen ist waehrenddessen gesperrt.");
-}
-
-function exitSignatureMode({ restoreTool = true, message = "" } = {}) {
-  finishWhiteboardStroke();
-  state.signature.active = false;
-  document.body.classList.remove("signature-mode");
-  hideWhiteboardCursor();
-  if (restoreTool) {
-    state.activePdfTool = state.signature.returnTool || "select";
-  }
-  if (hasEditableDocument()) {
-    el.signatureCanvas.hidden = true;
-    el.signatureCursor.hidden = true;
-    el.pageContainer.classList.remove("signature-drawing-active");
-  }
-  updateButtons();
-  updateMeta();
-  if (message) {
-    setStatus(message);
-  }
-}
-
-function getSignatureImageFromCanvas() {
-  const canvas = el.signatureCanvas;
-  if (!canvas.width || !canvas.height) {
-    return null;
-  }
-
-  const context = getWhiteboardContext();
-  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imageData.data;
-  let minX = canvas.width;
-  let minY = canvas.height;
-  let maxX = -1;
-  let maxY = -1;
-
-  for (let y = 0; y < canvas.height; y += 1) {
-    for (let x = 0; x < canvas.width; x += 1) {
-      const alpha = data[((y * canvas.width + x) * 4) + 3];
-      if (alpha <= 8) {
-        continue;
-      }
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    }
-  }
-
-  if (maxX < minX || maxY < minY) {
-    return null;
-  }
-
-  const scaleX = canvas.width / Math.max(1, canvas.clientWidth);
-  const scaleY = canvas.height / Math.max(1, canvas.clientHeight);
-  const padding = Math.ceil(Math.max(scaleX, scaleY) * 8);
-  minX = Math.max(0, minX - padding);
-  minY = Math.max(0, minY - padding);
-  maxX = Math.min(canvas.width - 1, maxX + padding);
-  maxY = Math.min(canvas.height - 1, maxY + padding);
-
-  const cropWidth = Math.max(1, maxX - minX + 1);
-  const cropHeight = Math.max(1, maxY - minY + 1);
-  const outputCanvas = document.createElement("canvas");
-  outputCanvas.width = cropWidth;
-  outputCanvas.height = cropHeight;
-  const outputContext = outputCanvas.getContext("2d");
-  if (!outputContext) {
-    return null;
-  }
-  outputContext.drawImage(
-    canvas,
-    minX,
-    minY,
-    cropWidth,
-    cropHeight,
-    0,
-    0,
-    cropWidth,
-    cropHeight,
-  );
-
-  return {
-    dataUrl: outputCanvas.toDataURL("image/png"),
-    displayX: minX / scaleX,
-    displayY: minY / scaleY,
-    displayWidth: cropWidth / scaleX,
-    displayHeight: cropHeight / scaleY,
-  };
-}
-
-function createSignatureBlockFromCanvas() {
-  if (!isSignatureMode()) {
-    return false;
-  }
-  const page = getCurrentPageModel();
-  const signatureImage = getSignatureImageFromCanvas();
-  if (!page || !signatureImage) {
-    setStatus("Bitte zuerst eine Unterschrift zeichnen.");
-    return false;
-  }
-
-  const rawWidth = signatureImage.displayWidth / Math.max(state.zoom, 0.01);
-  const rawHeight = signatureImage.displayHeight / Math.max(state.zoom, 0.01);
-  const centerX = (signatureImage.displayX + (signatureImage.displayWidth / 2)) / Math.max(state.zoom, 0.01);
-  const centerY = (signatureImage.displayY + (signatureImage.displayHeight / 2)) / Math.max(state.zoom, 0.01);
-  const width = clamp(rawWidth, MANUAL_SIGNATURE_MIN_WIDTH, page.width);
-  const height = clamp(rawHeight, MANUAL_SIGNATURE_MIN_HEIGHT, page.height);
-  const x0 = clampToPage(page.width, centerX - (width / 2), width, 0);
-  const y0 = clampToPage(page.height, centerY - (height / 2), height, 0);
-
-  const block = {
-    id: createBlockId(`signature-page-${state.currentPage}`),
-    page: state.currentPage,
-    fieldType: "image",
-    bbox: {
-      x0,
-      y0,
-      x1: x0 + width,
-      y1: y0 + height,
-    },
-    originalText: "signature",
-    currentText: "signature",
-    originalValue: "signature",
-    currentValue: "signature",
-    fontFamily: "Helvetica",
-    fontKey: "Helvetica",
-    fontSize: 1,
-    color: state.whiteboard.color || "#000000",
-    lineHeight: 1,
-    align: "left",
-    rotation: 0,
-    groupKind: "manual-signature",
-    minFontSize: 1,
-    editable: true,
-    cssFontFamily: "Arial, sans-serif",
-    fontAssetId: null,
-    fontWeight: "400",
-    fontStyle: "normal",
-    textDecoration: "none",
-    baseline: y0 + height,
-    isCheckbox: false,
-    isCustom: true,
-    imageDataUrl: signatureImage.dataUrl,
-    imageWidth: signatureImage.displayWidth,
-    imageHeight: signatureImage.displayHeight,
-  };
-
-  state.document.blocks.push(block);
-  state.selectedBlockId = block.id;
-  state.editingBlockId = null;
-  state.pendingFocusBlockId = null;
-  state.activePdfTool = "select";
-  exitSignatureMode({ restoreTool: false });
-  renderTextLayer();
-  commitDocumentHistory();
-  scheduleDraftSave();
-  setStatus("Unterschrift eingefuegt. Du kannst sie verschieben, vergroessern oder mit Entf loeschen.");
-  return true;
 }
 
 function clampToPage(page, value, size, padding = 2) {
@@ -1896,6 +1721,348 @@ function createManualOverlayBlock(event, tool = state.activePdfTool) {
       ? "Weißes Textfeld gesetzt. Zum Schreiben anklicken."
       : (tool === "erase" ? "Weiße Löschfläche gesetzt." : "Ankreuzfeld gesetzt."),
   );
+}
+
+function getSignaturePenSize() {
+  return clamp(Math.round(Number(state.signature.penSize) || SIGNATURE_DEFAULT_PEN_SIZE), 1, SIGNATURE_MAX_PEN_SIZE);
+}
+
+function getSignatureStrokeWidthPdf() {
+  return Math.max(SIGNATURE_MIN_STROKE_WIDTH, getSignaturePenSize() / Math.max(0.01, state.zoom));
+}
+
+function getSignatureContext() {
+  const context = el.signatureCanvas?.getContext("2d");
+  if (!context) {
+    throw new Error("Signatur-Kontext konnte nicht erstellt werden.");
+  }
+  return context;
+}
+
+function clearSignatureCanvas() {
+  if (!el.signatureCanvas) {
+    return;
+  }
+  const context = getSignatureContext();
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, el.signatureCanvas.width, el.signatureCanvas.height);
+  context.restore();
+}
+
+function resizeSignatureCanvas() {
+  if (!el.signatureCanvas) {
+    return;
+  }
+  const page = getCurrentPageModel();
+  if (!page) {
+    el.signatureCanvas.width = 1;
+    el.signatureCanvas.height = 1;
+    el.signatureCanvas.style.width = "1px";
+    el.signatureCanvas.style.height = "1px";
+    return;
+  }
+
+  const displayWidth = Math.max(1, Math.round(page.width * state.zoom));
+  const displayHeight = Math.max(1, Math.round(page.height * state.zoom));
+  const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+  const targetWidth = Math.max(1, Math.round(displayWidth * dpr));
+  const targetHeight = Math.max(1, Math.round(displayHeight * dpr));
+
+  if (el.signatureCanvas.width !== targetWidth || el.signatureCanvas.height !== targetHeight) {
+    el.signatureCanvas.width = targetWidth;
+    el.signatureCanvas.height = targetHeight;
+  }
+  el.signatureCanvas.style.width = `${displayWidth}px`;
+  el.signatureCanvas.style.height = `${displayHeight}px`;
+
+  const context = getSignatureContext();
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.clearRect(0, 0, displayWidth, displayHeight);
+}
+
+function getSignaturePoint(event) {
+  const rect = el.signatureCanvas.getBoundingClientRect();
+  const screenX = clamp(event.clientX - rect.left, 0, rect.width);
+  const screenY = clamp(event.clientY - rect.top, 0, rect.height);
+  const pdfX = screenX / Math.max(0.01, state.zoom);
+  const pdfY = screenY / Math.max(0.01, state.zoom);
+  return {
+    x: screenX,
+    y: screenY,
+    pdfX,
+    pdfY,
+  };
+}
+
+function drawSignatureSegment(fromPoint, toPoint) {
+  const context = getSignatureContext();
+  const penSize = getSignaturePenSize();
+  context.save();
+  context.strokeStyle = state.signature.color;
+  context.fillStyle = state.signature.color;
+  context.lineWidth = penSize;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.beginPath();
+  context.moveTo(fromPoint.x, fromPoint.y);
+  context.lineTo(toPoint.x, toPoint.y);
+  context.stroke();
+  context.beginPath();
+  context.arc(toPoint.x, toPoint.y, penSize / 2, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
+}
+
+function stopSignatureDrawing(pointerId = null) {
+  state.signature.isDrawing = false;
+  state.signature.lastPoint = null;
+  const activePointerId = pointerId ?? state.signature.pointerId;
+  if (
+    activePointerId !== null
+    && typeof el.signatureCanvas?.hasPointerCapture === "function"
+    && el.signatureCanvas.hasPointerCapture(activePointerId)
+  ) {
+    try {
+      el.signatureCanvas.releasePointerCapture(activePointerId);
+    } catch (error) {
+      // Ignore invalid release attempts.
+    }
+  }
+  state.signature.pointerId = null;
+}
+
+function createSignatureBlockFromStroke(stroke) {
+  const page = getCurrentPageModel();
+  const points = Array.isArray(stroke?.points)
+    ? stroke.points
+      .map((point) => ({
+        x: Number(point.x),
+        y: Number(point.y),
+      }))
+      .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+    : [];
+  if (!page || points.length === 0) {
+    return null;
+  }
+
+  const strokeWidth = Math.max(SIGNATURE_MIN_STROKE_WIDTH, Number(stroke.width) || SIGNATURE_MIN_STROKE_WIDTH);
+  const padding = Math.max(0.6, strokeWidth * 0.75);
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+  const bbox = clampRectToPage({
+    x0: minX - padding,
+    y0: minY - padding,
+    x1: maxX + padding,
+    y1: maxY + padding,
+  }, page);
+
+  const minimumSize = Math.max(1, strokeWidth * 2);
+  if (bbox.x1 - bbox.x0 < minimumSize) {
+    const center = (bbox.x0 + bbox.x1) / 2;
+    bbox.x0 = clamp(center - (minimumSize / 2), 0, Math.max(0, page.width - minimumSize));
+    bbox.x1 = Math.min(page.width, bbox.x0 + minimumSize);
+  }
+  if (bbox.y1 - bbox.y0 < minimumSize) {
+    const center = (bbox.y0 + bbox.y1) / 2;
+    bbox.y0 = clamp(center - (minimumSize / 2), 0, Math.max(0, page.height - minimumSize));
+    bbox.y1 = Math.min(page.height, bbox.y0 + minimumSize);
+  }
+
+  return {
+    id: createBlockId(`signature-page-${state.currentPage}`),
+    page: state.currentPage,
+    fieldType: "ink-signature",
+    bbox,
+    rect: { ...bbox },
+    quads: [{
+      x0: bbox.x0,
+      y0: bbox.y0,
+      x1: bbox.x1,
+      y1: bbox.y0,
+      x2: bbox.x1,
+      y2: bbox.y1,
+      x3: bbox.x0,
+      y3: bbox.y1,
+    }],
+    sourceType: "manual",
+    originalText: "",
+    currentText: "",
+    originalValue: "",
+    currentValue: "",
+    fontFamily: "Helvetica",
+    fontKey: "Helvetica",
+    fontSize: 1,
+    color: stroke.color || "#000000",
+    lineHeight: 1,
+    align: "left",
+    rotation: 0,
+    groupKind: "ink-signature",
+    minFontSize: 1,
+    editable: false,
+    cssFontFamily: "Arial, Helvetica, sans-serif",
+    fontAssetId: null,
+    fontWeight: "400",
+    fontStyle: "normal",
+    textDecoration: "none",
+    baseline: null,
+    isCheckbox: false,
+    isCustom: true,
+    inkPayload: {
+      strokes: [{
+        color: stroke.color || "#000000",
+        width: strokeWidth,
+        points,
+      }],
+    },
+  };
+}
+
+function finishSignatureStroke(pointerId = null) {
+  const stroke = state.signature.currentStroke;
+  state.signature.currentStroke = null;
+  stopSignatureDrawing(pointerId);
+  clearSignatureCanvas();
+
+  if (!stroke || !hasEditableDocument()) {
+    return;
+  }
+
+  const block = createSignatureBlockFromStroke(stroke);
+  if (!block) {
+    return;
+  }
+
+  state.document.blocks.push(block);
+  state.selectedBlockId = null;
+  state.editingBlockId = null;
+  renderTextLayer();
+  commitDocumentHistory();
+  scheduleDraftSave();
+  setStatus("Unterschrift gesetzt.");
+}
+
+function renderSignatureBlock(block, scale) {
+  if (!block?.bbox) {
+    return;
+  }
+
+  const bboxWidth = Math.max(0.1, block.bbox.x1 - block.bbox.x0);
+  const bboxHeight = Math.max(0.1, block.bbox.y1 - block.bbox.y0);
+  const node = document.createElement("div");
+  node.className = "signature-block";
+  node.dataset.blockId = block.id;
+  node.style.left = `${block.bbox.x0 * scale}px`;
+  node.style.top = `${block.bbox.y0 * scale}px`;
+  node.style.width = `${Math.max(1, bboxWidth * scale)}px`;
+  node.style.height = `${Math.max(1, bboxHeight * scale)}px`;
+  node.tabIndex = 0;
+  if (block.id === state.selectedBlockId) {
+    node.classList.add("selected");
+  }
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${bboxWidth} ${bboxHeight}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+
+  for (const stroke of getSignatureStrokes(block)) {
+    const points = Array.isArray(stroke.points)
+      ? stroke.points
+        .map((point) => ({
+          x: Number(point.x) - block.bbox.x0,
+          y: Number(point.y) - block.bbox.y0,
+        }))
+        .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      : [];
+    if (points.length === 0) {
+      continue;
+    }
+
+    const strokeWidth = Math.max(SIGNATURE_MIN_STROKE_WIDTH, Number(stroke.width) || SIGNATURE_MIN_STROKE_WIDTH);
+    if (points.length === 1) {
+      const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      circle.setAttribute("cx", String(points[0].x));
+      circle.setAttribute("cy", String(points[0].y));
+      circle.setAttribute("r", String(strokeWidth / 2));
+      circle.setAttribute("fill", stroke.color || block.color || "#000000");
+      svg.appendChild(circle);
+      continue;
+    }
+
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "));
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", stroke.color || block.color || "#000000");
+    path.setAttribute("stroke-width", String(strokeWidth));
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+  }
+
+  node.appendChild(svg);
+  node.addEventListener("mousedown", (event) => {
+    if (state.signature.active || event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    state.selectedBlockId = block.id;
+    state.editingBlockId = null;
+    syncSelectedBlock();
+    node.focus({ preventScroll: true });
+  });
+  el.textLayer.appendChild(node);
+}
+
+function clearCurrentPageSignatures() {
+  if (!hasEditableDocument()) {
+    return;
+  }
+
+  const beforeCount = state.document.blocks.length;
+  state.document.blocks = state.document.blocks.filter(
+    (block) => !(block.page === state.currentPage && isSignatureBlock(block)),
+  );
+  if (state.document.blocks.length === beforeCount) {
+    setStatus("Keine Unterschrift auf dieser Seite.");
+    return;
+  }
+
+  state.selectedBlockId = null;
+  state.editingBlockId = null;
+  clearSignatureCanvas();
+  renderTextLayer();
+  commitDocumentHistory();
+  scheduleDraftSave();
+  setStatus("Unterschrift auf dieser Seite geleert.");
+}
+
+function setSignatureMode(active) {
+  const nextActive = Boolean(active) && hasEditableDocument();
+  if (state.signature.active === nextActive) {
+    updateButtons();
+    return;
+  }
+
+  if (!nextActive) {
+    finishSignatureStroke();
+  }
+
+  state.signature.active = nextActive;
+  state.activePdfTool = nextActive ? "signature" : "select";
+  clearSelection();
+  if (nextActive) {
+    resizeSignatureCanvas();
+    setStatus("Signieren aktiv. Mit Maus oder Touch direkt auf der PDF unterschreiben.");
+  } else {
+    clearSignatureCanvas();
+    setStatus("Signieren beendet.");
+  }
+  updateButtons();
 }
 
 function createCustomTextBlock(event) {
@@ -2086,18 +2253,14 @@ function handleResizeMove(event) {
 
   event.preventDefault();
 
-  const isFlexibleManualOverlay = isManualTextBlock(block) || isManualCoverBlock(block) || isManualSignatureBlock(block);
+  const isFlexibleManualOverlay = isManualTextBlock(block) || isManualCoverBlock(block);
   const minWidth = isManualCheckboxBlock(block)
     ? MANUAL_CHECKBOX_MIN_SIZE
-    : isManualSignatureBlock(block)
-    ? MANUAL_SIGNATURE_MIN_WIDTH
     : isFlexibleManualOverlay
     ? MANUAL_OVERLAY_MIN_SIZE
     : CUSTOM_BLOCK_MIN_WIDTH;
   const minHeight = isManualCheckboxBlock(block)
     ? MANUAL_CHECKBOX_MIN_SIZE
-    : isManualSignatureBlock(block)
-    ? MANUAL_SIGNATURE_MIN_HEIGHT
     : isFlexibleManualOverlay
     ? MANUAL_OVERLAY_MIN_SIZE
     : CUSTOM_BLOCK_MIN_HEIGHT;
@@ -2281,7 +2444,7 @@ function handleDeleteForEmptyManualTextBlock(event) {
 }
 
 function isKeyboardDeletableManualOverlayBlock(block) {
-  return isManualCoverBlock(block) || isManualCheckboxBlock(block) || isManualSignatureBlock(block);
+  return isManualCoverBlock(block) || isManualCheckboxBlock(block);
 }
 
 function handleDeleteForSelectedManualOverlayBlock(event) {
@@ -2533,7 +2696,7 @@ function canRedoWhiteboard() {
 }
 
 function createWhiteboardSnapshot() {
-  const canvas = getActiveDrawingCanvas();
+  const canvas = el.whiteboardCanvas;
   if (!canvas.width || !canvas.height) {
     return null;
   }
@@ -2582,7 +2745,7 @@ function commitWhiteboardHistory() {
 
 async function restoreWhiteboardSnapshot(snapshot) {
   resizeWhiteboardCanvas(false);
-  const canvas = getActiveDrawingCanvas();
+  const canvas = el.whiteboardCanvas;
   const context = getWhiteboardContext();
   resetWhiteboardCanvas(context, canvas.width, canvas.height);
 
@@ -2628,8 +2791,7 @@ async function moveWhiteboardHistory(step) {
 }
 
 function updateWhiteboardToolButtons() {
-  const visible = isDrawingSurfaceMode();
-  const signatureVisible = isSignatureMode();
+  const visible = isWhiteboardMode();
   el.whiteboardPenButton.hidden = !visible;
   el.whiteboardEraserButton.hidden = !visible;
   el.whiteboardColorLabel.hidden = !visible;
@@ -2640,14 +2802,6 @@ function updateWhiteboardToolButtons() {
   el.whiteboardClearButton.hidden = !visible;
   el.whiteboardUndoButton.hidden = !visible;
   el.whiteboardRedoButton.hidden = !visible;
-  if (el.signatureInsertButton) {
-    el.signatureInsertButton.hidden = !signatureVisible;
-    el.signatureInsertButton.disabled = !signatureVisible;
-  }
-  if (el.signatureCancelButton) {
-    el.signatureCancelButton.hidden = !signatureVisible;
-    el.signatureCancelButton.disabled = !signatureVisible;
-  }
   el.whiteboardPenButton.classList.toggle("active-tool", visible && state.whiteboard.mode === "pen");
   el.whiteboardEraserButton.classList.toggle("active-tool", visible && state.whiteboard.mode === "eraser");
   el.whiteboardColorInput.disabled = !visible || state.whiteboard.mode === "eraser";
@@ -2658,72 +2812,108 @@ function updateWhiteboardToolButtons() {
   el.whiteboardColorInput.value = state.whiteboard.color;
   el.whiteboardThicknessInput.value = String(penSize);
   el.whiteboardThicknessValue.textContent = `${penSize} px`;
-  el.whiteboardContainer.hidden = !isWhiteboardMode();
-  if (el.signatureCanvas) {
-    el.signatureCanvas.hidden = !signatureVisible;
-  }
-  if (signatureVisible) {
-    el.pageContainer.hidden = false;
-    el.pageContainer.classList.add("signature-drawing-active");
-    resizeWhiteboardCanvas(true);
-    updateWhiteboardCursorAppearance();
-    return;
-  }
-  el.pageContainer.classList.remove("signature-drawing-active");
-  if (isWhiteboardMode()) {
+  el.whiteboardContainer.hidden = !visible;
+  if (visible) {
     updateWhiteboardCursorAppearance();
     el.pageContainer.hidden = true;
     return;
   }
   hideWhiteboardCursor();
-  if (hasEditableDocument() && el.backgroundImage.getAttribute("src")) {
-    el.pageContainer.hidden = false;
+}
+
+function updateSignatureToolButtons() {
+  const hasDoc = hasEditableDocument();
+  if (!hasDoc && state.signature.active) {
+    stopSignatureDrawing();
+    state.signature.currentStroke = null;
+    state.signature.active = false;
+    state.activePdfTool = "select";
+  }
+
+  const visible = hasDoc && state.signature.active;
+  document.body.classList.toggle("signature-mode", visible);
+
+  const controls = [
+    el.signatureColorLabel,
+    el.signatureColorInput,
+    el.signatureThicknessLabel,
+    el.signatureThicknessInput,
+    el.signatureThicknessValue,
+    el.signatureClearButton,
+    el.signatureDoneButton,
+  ];
+  for (const control of controls) {
+    if (!control) {
+      continue;
+    }
+    control.hidden = !visible;
+    if ("disabled" in control) {
+      control.disabled = !visible;
+    }
+  }
+
+  if (el.signatureButton) {
+    el.signatureButton.hidden = !hasDoc;
+    el.signatureButton.disabled = !hasDoc;
+    el.signatureButton.classList.toggle("active-tool", visible);
+  }
+  if (el.signatureColorInput) {
+    el.signatureColorInput.value = state.signature.color;
+  }
+  const penSize = getSignaturePenSize();
+  if (el.signatureThicknessInput) {
+    el.signatureThicknessInput.value = String(penSize);
+  }
+  if (el.signatureThicknessValue) {
+    el.signatureThicknessValue.textContent = `${penSize} px`;
+  }
+  if (el.signatureCanvas) {
+    el.signatureCanvas.hidden = !visible;
+    if (visible) {
+      resizeSignatureCanvas();
+    } else {
+      clearSignatureCanvas();
+    }
   }
 }
 
 function updateWhiteboardCursorAppearance() {
   const eraserMode = state.whiteboard.mode === "eraser";
   const strokeWidth = getWhiteboardStrokeWidth();
-  const canvas = getActiveDrawingCanvas();
-  const cursor = getActiveDrawingCursor();
-  canvas.classList.toggle("eraser-mode", eraserMode);
-  cursor.classList.toggle("eraser", eraserMode);
-  cursor.style.setProperty(
+  el.whiteboardCanvas.classList.toggle("eraser-mode", eraserMode);
+  el.whiteboardCursor.classList.toggle("eraser", eraserMode);
+  el.whiteboardCursor.style.setProperty(
     "--whiteboard-cursor-size",
     `${eraserMode ? strokeWidth : Math.max(12, strokeWidth + 6)}px`,
   );
-  cursor.style.setProperty(
+  el.whiteboardCursor.style.setProperty(
     "--whiteboard-cursor-fill",
     eraserMode ? "rgba(255, 255, 255, 0.45)" : state.whiteboard.color,
   );
 }
 
 function hideWhiteboardCursor() {
-  const canvas = getActiveDrawingCanvas();
-  const cursor = getActiveDrawingCursor();
   state.whiteboard.cursorVisible = false;
-  cursor.hidden = true;
-  canvas.classList.remove("cursor-hidden");
+  el.whiteboardCursor.hidden = true;
+  el.whiteboardCanvas.classList.remove("cursor-hidden");
 }
 
 function showWhiteboardCursor(point, pointerType = "") {
-  if (!isDrawingSurfaceMode() || pointerType === "touch") {
+  if (!isWhiteboardMode() || pointerType === "touch") {
     hideWhiteboardCursor();
     return;
   }
 
   updateWhiteboardCursorAppearance();
-  const canvas = getActiveDrawingCanvas();
-  const cursor = getActiveDrawingCursor();
-  cursor.style.left = `${point.x}px`;
-  cursor.style.top = `${point.y}px`;
-  cursor.hidden = false;
+  el.whiteboardCursor.style.left = `${point.x}px`;
+  el.whiteboardCursor.style.top = `${point.y}px`;
+  el.whiteboardCursor.hidden = false;
   state.whiteboard.cursorVisible = true;
-  canvas.classList.add("cursor-hidden");
+  el.whiteboardCanvas.classList.add("cursor-hidden");
 }
 
 function getWhiteboardContext() {
-  const context = getActiveDrawingCanvas().getContext("2d");
+  const context = el.whiteboardCanvas.getContext("2d");
   if (!context) {
     throw new Error("Whiteboard-Kontext konnte nicht erstellt werden.");
   }
@@ -2733,25 +2923,16 @@ function getWhiteboardContext() {
 function resetWhiteboardCanvas(context, width, height) {
   context.save();
   context.setTransform(1, 0, 0, 1, 0, 0);
-  if (isSignatureMode()) {
-    context.clearRect(0, 0, width, height);
-  } else {
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, width, height);
-  }
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
   context.restore();
 }
 
 function resizeWhiteboardCanvas(preserveDrawing = true) {
-  const canvas = getActiveDrawingCanvas();
-  const page = getCurrentPageModel();
-  const containerWidth = isSignatureMode() && page
-    ? page.width * state.zoom
-    : Math.max(320, el.pageArea.clientWidth - 24);
+  const canvas = el.whiteboardCanvas;
+  const containerWidth = Math.max(320, el.pageArea.clientWidth - 24);
   const containerTop = el.pageArea.getBoundingClientRect().top;
-  const displayHeight = isSignatureMode() && page
-    ? page.height * state.zoom
-    : Math.max(600, Math.floor(window.innerHeight - containerTop - 36));
+  const displayHeight = Math.max(600, Math.floor(window.innerHeight - containerTop - 36));
   const displayWidth = Math.floor(containerWidth);
   const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
   const targetWidth = Math.max(1, Math.round(displayWidth * dpr));
@@ -2791,8 +2972,7 @@ function resizeWhiteboardCanvas(preserveDrawing = true) {
 function clearWhiteboard(setMessage = true) {
   resizeWhiteboardCanvas(true);
   const context = getWhiteboardContext();
-  const canvas = getActiveDrawingCanvas();
-  resetWhiteboardCanvas(context, canvas.width, canvas.height);
+  resetWhiteboardCanvas(context, el.whiteboardCanvas.width, el.whiteboardCanvas.height);
   stopWhiteboardDrawing();
   state.whiteboard.hasUncommittedChange = false;
   if (state.whiteboard.history.length === 0) {
@@ -2801,7 +2981,7 @@ function clearWhiteboard(setMessage = true) {
     commitWhiteboardHistory();
   }
   if (setMessage) {
-    setStatus(isSignatureMode() ? "Unterschrift geleert." : "Whiteboard geleert.");
+    setStatus("Whiteboard geleert.");
   }
 }
 
@@ -2812,7 +2992,7 @@ function setWhiteboardMode(mode) {
 }
 
 function getWhiteboardPoint(event) {
-  const rect = getActiveDrawingCanvas().getBoundingClientRect();
+  const rect = el.whiteboardCanvas.getBoundingClientRect();
   return {
     x: clamp(event.clientX - rect.left, 0, rect.width),
     y: clamp(event.clientY - rect.top, 0, rect.height),
@@ -2829,9 +3009,6 @@ function drawWhiteboardSegment(fromPoint, toPoint) {
   const context = getWhiteboardContext();
   const strokeWidth = getWhiteboardStrokeWidth();
   context.save();
-  if (isSignatureMode() && state.whiteboard.mode === "eraser") {
-    context.globalCompositeOperation = "destination-out";
-  }
   context.strokeStyle = state.whiteboard.mode === "eraser" ? "#ffffff" : state.whiteboard.color;
   context.fillStyle = state.whiteboard.mode === "eraser" ? "#ffffff" : state.whiteboard.color;
   context.lineWidth = strokeWidth;
@@ -2859,14 +3036,13 @@ function stopWhiteboardDrawing(pointerId = null) {
   state.whiteboard.isDrawing = false;
   state.whiteboard.lastPoint = null;
   const activePointerId = pointerId ?? state.whiteboard.pointerId;
-  const canvas = getActiveDrawingCanvas();
   if (
     activePointerId !== null
-    && typeof canvas.hasPointerCapture === "function"
-    && canvas.hasPointerCapture(activePointerId)
+    && typeof el.whiteboardCanvas.hasPointerCapture === "function"
+    && el.whiteboardCanvas.hasPointerCapture(activePointerId)
   ) {
     try {
-      canvas.releasePointerCapture(activePointerId);
+      el.whiteboardCanvas.releasePointerCapture(activePointerId);
     } catch (error) {
       // Ignore invalid release attempts.
     }
@@ -2950,11 +3126,8 @@ function updateButtons() {
       continue;
     }
     button.hidden = !hasDoc;
-    button.disabled = !hasDoc || (isSignatureMode() && tool !== "signature");
-    button.classList.toggle(
-      "active-tool",
-      hasDoc && (tool === "signature" ? isSignatureMode() : state.activePdfTool === tool),
-    );
+    button.disabled = !hasDoc;
+    button.classList.toggle("active-tool", hasDoc && state.activePdfTool === tool);
   }
   el.prevButton.hidden = !hasDoc;
   el.nextButton.hidden = !hasDoc;
@@ -2985,16 +3158,11 @@ function updateButtons() {
     el.updateInstallButton.disabled = state.updateInstalling;
   }
   updateWhiteboardToolButtons();
+  updateSignatureToolButtons();
   syncManualTextStyleControls();
 }
 
 function updateMeta() {
-  if (isSignatureMode()) {
-    const sourceName = String(state.document.sourcePath || "Dokument.pdf").split(/[\\/]/).pop() || "Dokument.pdf";
-    el.meta.textContent = `${sourceName} | Unterschrift auf Seite ${state.currentPage}/${state.document.pageCount}`;
-    return;
-  }
-
   if (!hasEditableDocument()) {
     el.meta.textContent = "Whiteboard aktiv.";
     return;
@@ -3050,6 +3218,11 @@ function applyPageDisplaySize(page, displayWidth, displayHeight) {
   el.pageContainer.style.height = `${displayHeight}px`;
   el.textLayer.style.width = `${displayWidth}px`;
   el.textLayer.style.height = `${displayHeight}px`;
+  if (el.signatureCanvas) {
+    el.signatureCanvas.style.width = `${displayWidth}px`;
+    el.signatureCanvas.style.height = `${displayHeight}px`;
+    resizeSignatureCanvas();
+  }
 }
 
 async function loadBackground(options = {}) {
@@ -3244,6 +3417,10 @@ function renderTextLayer() {
   renderScanTemplateCovers(page, blocks, scale);
 
   for (const block of blocks) {
+    if (isSignatureBlock(block)) {
+      renderSignatureBlock(block, scale);
+      continue;
+    }
     if (block.editable === false && !block.isCheckbox) {
       continue;
     }
@@ -3293,45 +3470,6 @@ function renderTextLayer() {
     node.style.height = `${getBlockHeight(block, scale)}px`;
     node.style.transform = `rotate(${Number(block.rotation) || 0}deg)`;
     node.style.setProperty("--masked-text-color", block.color || "#000");
-
-    if (isManualSignatureBlock(block)) {
-      node.title = "Unterschrift";
-      node.tabIndex = 0;
-      const image = document.createElement("img");
-      image.className = "manual-signature-image";
-      image.alt = "";
-      image.draggable = false;
-      image.src = block.imageDataUrl || "";
-      node.appendChild(image);
-      node.addEventListener("mousedown", (event) => {
-        if (event.button !== 0) {
-          return;
-        }
-        state.selectedBlockId = block.id;
-        state.editingBlockId = null;
-        syncSelectedBlock();
-        node.focus({ preventScroll: true });
-        beginPotentialDrag(block, node, event);
-      });
-      node.addEventListener("click", (event) => {
-        if (state.suppressClickBlockId === block.id) {
-          state.suppressClickBlockId = null;
-          event.preventDefault();
-          return;
-        }
-        const eventTarget = event.target instanceof HTMLElement ? event.target : null;
-        if (eventTarget?.closest(".resize-handle, .rotate-handle")) {
-          return;
-        }
-        state.selectedBlockId = block.id;
-        state.editingBlockId = null;
-        syncSelectedBlock();
-        node.focus({ preventScroll: true });
-      });
-      appendManualTransformHandles(node, block);
-      el.textLayer.appendChild(node);
-      continue;
-    }
 
     if (block.isCheckbox) {
       const renderMark = block.currentText.trim() && !isUnchangedScanGeneratedCheckbox(block);
@@ -4016,7 +4154,10 @@ async function applyImportedDocument(documentModel) {
   state.editingBlockId = null;
   state.activePdfTool = "select";
   state.signature.active = false;
-  document.body.classList.remove("signature-mode");
+  state.signature.isDrawing = false;
+  state.signature.currentStroke = null;
+  state.signature.lastPoint = null;
+  state.signature.pointerId = null;
   state.lastExportPath = null;
   state.backgroundLoadToken += 1;
   state.renderedBackgroundPage = null;
@@ -4271,6 +4412,28 @@ el.uncheckButton?.addEventListener("click", () => {
   setStatus("Kreuz löschen aktiv. Auf die Box klicken, um sie weiß zu überdecken.");
 });
 
+el.signatureButton?.addEventListener("click", () => {
+  setSignatureMode(true);
+});
+
+el.signatureDoneButton?.addEventListener("click", () => {
+  setSignatureMode(false);
+});
+
+el.signatureClearButton?.addEventListener("click", () => {
+  clearCurrentPageSignatures();
+});
+
+el.signatureColorInput?.addEventListener("input", () => {
+  state.signature.color = el.signatureColorInput.value || "#000000";
+  updateSignatureToolButtons();
+});
+
+el.signatureThicknessInput?.addEventListener("input", () => {
+  state.signature.penSize = Number(el.signatureThicknessInput.value) || SIGNATURE_DEFAULT_PEN_SIZE;
+  updateSignatureToolButtons();
+});
+
 el.exportButton.addEventListener("click", async () => {
   try {
     if (hasEditableDocument()) {
@@ -4346,121 +4509,138 @@ el.whiteboardThicknessInput.addEventListener("input", () => {
   updateWhiteboardToolButtons();
 });
 
-if (el.signatureButton) {
-  el.signatureButton.addEventListener("click", () => {
-    enterSignatureMode();
-  });
-}
-
-if (el.signatureInsertButton) {
-  el.signatureInsertButton.addEventListener("click", () => {
-    createSignatureBlockFromCanvas();
-  });
-}
-
-if (el.signatureCancelButton) {
-  el.signatureCancelButton.addEventListener("click", () => {
-    clearWhiteboard(false);
-    exitSignatureMode({ message: "Unterschrift abgebrochen." });
-  });
-}
-
-function bindDrawingCanvasEvents(canvas) {
-  if (!canvas) {
+el.whiteboardCanvas.addEventListener("pointerenter", (event) => {
+  if (!isWhiteboardMode()) {
+    hideWhiteboardCursor();
     return;
   }
+  syncWhiteboardCursorFromEvent(event);
+});
 
-  canvas.addEventListener("pointerenter", (event) => {
-    if (!isDrawingSurfaceMode() || canvas !== getActiveDrawingCanvas()) {
-      hideWhiteboardCursor();
-      return;
-    }
-    syncWhiteboardCursorFromEvent(event);
-  });
+el.whiteboardCanvas.addEventListener("pointerdown", (event) => {
+  if (!isWhiteboardMode() || state.whiteboard.isRestoringHistory || event.button !== 0) {
+    return;
+  }
+  resizeWhiteboardCanvas(true);
+  event.preventDefault();
+  const point = syncWhiteboardCursorFromEvent(event);
+  state.whiteboard.isDrawing = true;
+  state.whiteboard.lastPoint = point;
+  state.whiteboard.pointerId = event.pointerId;
+  state.whiteboard.hasUncommittedChange = true;
+  el.whiteboardCanvas.setPointerCapture(event.pointerId);
+  drawWhiteboardSegment(point, point);
+});
 
-  canvas.addEventListener("pointerdown", (event) => {
-    if (
-      !isDrawingSurfaceMode()
-      || canvas !== getActiveDrawingCanvas()
-      || state.whiteboard.isRestoringHistory
-      || event.button !== 0
-    ) {
-      return;
-    }
-    resizeWhiteboardCanvas(true);
-    event.preventDefault();
-    const point = syncWhiteboardCursorFromEvent(event);
-    state.whiteboard.isDrawing = true;
-    state.whiteboard.lastPoint = point;
-    state.whiteboard.pointerId = event.pointerId;
-    state.whiteboard.hasUncommittedChange = true;
-    canvas.setPointerCapture(event.pointerId);
-    drawWhiteboardSegment(point, point);
-  });
-
-  canvas.addEventListener("pointermove", (event) => {
-    if (
-      !isDrawingSurfaceMode()
-      || canvas !== getActiveDrawingCanvas()
-      || state.whiteboard.isRestoringHistory
-    ) {
-      hideWhiteboardCursor();
-      return;
-    }
-    const point = syncWhiteboardCursorFromEvent(event);
-    if (!state.whiteboard.isDrawing || !state.whiteboard.lastPoint) {
-      return;
-    }
-    event.preventDefault();
-    drawWhiteboardSegment(state.whiteboard.lastPoint, point);
-    state.whiteboard.lastPoint = point;
-    state.whiteboard.hasUncommittedChange = true;
-  });
-
-  canvas.addEventListener("pointerup", (event) => {
-    if (canvas === getActiveDrawingCanvas()) {
-      syncWhiteboardCursorFromEvent(event);
-    }
-    finishWhiteboardStroke(event.pointerId);
-  });
-
-  canvas.addEventListener("pointercancel", (event) => {
-    finishWhiteboardStroke(event.pointerId);
+el.whiteboardCanvas.addEventListener("pointermove", (event) => {
+  if (!isWhiteboardMode() || state.whiteboard.isRestoringHistory) {
     hideWhiteboardCursor();
-  });
+    return;
+  }
+  const point = syncWhiteboardCursorFromEvent(event);
+  if (!state.whiteboard.isDrawing || !state.whiteboard.lastPoint) {
+    return;
+  }
+  event.preventDefault();
+  drawWhiteboardSegment(state.whiteboard.lastPoint, point);
+  state.whiteboard.lastPoint = point;
+  state.whiteboard.hasUncommittedChange = true;
+});
 
-  canvas.addEventListener("pointerleave", () => {
-    if (!state.whiteboard.isDrawing) {
-      hideWhiteboardCursor();
-    }
-  });
-}
+el.whiteboardCanvas.addEventListener("pointerup", (event) => {
+  syncWhiteboardCursorFromEvent(event);
+  finishWhiteboardStroke(event.pointerId);
+});
 
-bindDrawingCanvasEvents(el.whiteboardCanvas);
-bindDrawingCanvasEvents(el.signatureCanvas);
+el.whiteboardCanvas.addEventListener("pointercancel", (event) => {
+  finishWhiteboardStroke(event.pointerId);
+  hideWhiteboardCursor();
+});
+
+el.whiteboardCanvas.addEventListener("pointerleave", () => {
+  if (!state.whiteboard.isDrawing) {
+    hideWhiteboardCursor();
+  }
+});
 
 window.addEventListener("blur", () => {
   finishWhiteboardStroke();
   hideWhiteboardCursor();
+  finishSignatureStroke();
 });
+
+el.signatureCanvas?.addEventListener("pointerdown", (event) => {
+  if (!state.signature.active || !hasEditableDocument()) {
+    return;
+  }
+  if (event.pointerType !== "touch" && event.button !== 0) {
+    return;
+  }
+
+  resizeSignatureCanvas();
+  event.preventDefault();
+  event.stopPropagation();
+  const point = getSignaturePoint(event);
+  const stroke = {
+    color: state.signature.color,
+    width: getSignatureStrokeWidthPdf(),
+    points: [{ x: point.pdfX, y: point.pdfY }],
+  };
+  state.signature.isDrawing = true;
+  state.signature.lastPoint = point;
+  state.signature.pointerId = event.pointerId;
+  state.signature.currentStroke = stroke;
+  el.signatureCanvas.setPointerCapture(event.pointerId);
+  drawSignatureSegment(point, point);
+});
+
+el.signatureCanvas?.addEventListener("pointermove", (event) => {
+  if (!state.signature.active || !state.signature.isDrawing || !state.signature.lastPoint) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  const point = getSignaturePoint(event);
+  state.signature.currentStroke?.points.push({ x: point.pdfX, y: point.pdfY });
+  drawSignatureSegment(state.signature.lastPoint, point);
+  state.signature.lastPoint = point;
+});
+
+el.signatureCanvas?.addEventListener("pointerup", (event) => {
+  if (!state.signature.active) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  finishSignatureStroke(event.pointerId);
+});
+
+el.signatureCanvas?.addEventListener("pointercancel", (event) => {
+  finishSignatureStroke(event.pointerId);
+});
+
+el.signatureCanvas?.addEventListener("pointerleave", () => {
+  if (!state.signature.isDrawing) {
+    clearSignatureCanvas();
+  }
+});
+
+function preventSignatureScroll(event) {
+  if (!state.signature.active) {
+    return;
+  }
+  event.preventDefault();
+}
+
+el.pageArea.addEventListener("wheel", preventSignatureScroll, { passive: false });
+el.pageArea.addEventListener("touchmove", preventSignatureScroll, { passive: false });
 
 el.pageContainer.addEventListener("contextmenu", (event) => {
   if (state.activePdfTool && state.activePdfTool !== "select") {
     event.preventDefault();
   }
 });
-
-el.pageArea.addEventListener("wheel", (event) => {
-  if (isSignatureMode()) {
-    event.preventDefault();
-  }
-}, { passive: false });
-
-el.pageArea.addEventListener("touchmove", (event) => {
-  if (isSignatureMode()) {
-    event.preventDefault();
-  }
-}, { passive: false });
 
 el.pageContainer.addEventListener("click", (event) => {
   if (!state.document?.supportStatus?.supported || el.pageContainer.hidden) {
@@ -4471,7 +4651,12 @@ el.pageContainer.addEventListener("click", (event) => {
   }
 
   const target = event.target;
-  if (!(target instanceof Element) || target.closest(".text-block")) {
+  if (!(target instanceof Element) || target.closest(".text-block, .signature-block")) {
+    return;
+  }
+
+  if (state.signature.active || state.activePdfTool === "signature") {
+    event.preventDefault();
     return;
   }
 
@@ -4532,18 +4717,6 @@ document.addEventListener("keydown", handleDeleteForSelectedManualOverlayBlock, 
 document.addEventListener("keydown", handleDeleteForEmptyManualTextBlock, true);
 
 window.addEventListener("keydown", (event) => {
-  if (isSignatureMode()) {
-    if (event.key === "Escape") {
-      clearWhiteboard(false);
-      exitSignatureMode({ message: "Unterschrift abgebrochen." });
-      event.preventDefault();
-      return;
-    }
-    if ([" ", "PageDown", "PageUp", "Home", "End", "ArrowDown", "ArrowUp"].includes(event.key)) {
-      event.preventDefault();
-    }
-  }
-
   if (handleDeleteForSelectedManualOverlayBlock(event)) {
     return;
   }
@@ -4589,10 +4762,6 @@ window.addEventListener("keydown", (event) => {
 });
 
 window.addEventListener("resize", async () => {
-  if (isSignatureMode()) {
-    resizeWhiteboardCanvas(true);
-    return;
-  }
   if (hasEditableDocument()) {
     const page = getCurrentPageModel();
     if (!page) {
@@ -4600,6 +4769,9 @@ window.addEventListener("resize", async () => {
     }
     const availableWidth = Math.max(320, el.pageArea.clientWidth - 24);
     state.fitZoom = availableWidth / page.width;
+    if (state.signature.active) {
+      resizeSignatureCanvas();
+    }
   } else {
     resizeWhiteboardCanvas(true);
   }
