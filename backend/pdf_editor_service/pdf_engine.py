@@ -7214,6 +7214,37 @@ def _is_manual_text_block(block: TextBlock) -> bool:
     return _is_manual_overlay_block(block) and str(block.groupKind or "") == "manual-text"
 
 
+def _is_manual_signature_block(block: TextBlock) -> bool:
+    return _is_manual_overlay_block(block) and str(block.groupKind or "") == "manual-signature"
+
+
+def _decode_manual_signature_image(block: TextBlock) -> Optional[bytes]:
+    data_url = str(block.imageDataUrl or "")
+    if not data_url.startswith("data:image/png;base64,"):
+        return None
+    try:
+        return base64.b64decode(data_url.split(",", 1)[1], validate=True)
+    except Exception:
+        return None
+
+
+def _draw_manual_signature_overlay(page: pymupdf.Page, block: TextBlock) -> None:
+    if block.bbox is None:
+        return
+    image_bytes = _decode_manual_signature_image(block)
+    if not image_bytes:
+        return
+    rect = pymupdf.Rect(block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1) & page.rect
+    if rect.is_empty:
+        return
+    page.insert_image(
+        rect,
+        stream=image_bytes,
+        keep_proportion=False,
+        overlay=True,
+    )
+
+
 def _manual_text_descender_padding(font_size: float) -> float:
     return max(1.0, font_size * 0.32)
 
@@ -7264,6 +7295,8 @@ def _manual_overlay_cover_rect(block: TextBlock, page_rect: pymupdf.Rect) -> pym
 
 def _draw_manual_overlay_cover(page: pymupdf.Page, block: TextBlock) -> None:
     if block.bbox is None:
+        return
+    if _is_manual_signature_block(block):
         return
     if str(block.groupKind or "") == "manual-text" and not (block.currentText or "").strip():
         return
@@ -7346,6 +7379,10 @@ def _write_block_text(
     page_font_aliases: set[str],
     measurement_fonts: dict[str, pymupdf.Font],
 ) -> None:
+    if _is_manual_signature_block(block):
+        _draw_manual_signature_overlay(page, block)
+        return
+
     if page.rotation:
         _write_rotated_page_block_text(page, block, runtime, font_spec, color, page_font_aliases, measurement_fonts)
         return

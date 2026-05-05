@@ -129,6 +129,9 @@ class EditableField(BaseModel):
     fontStyle: str = "normal"
     textDecoration: str = "none"
     baseline: Optional[float] = None
+    imageDataUrl: Optional[str] = None
+    imageWidth: Optional[float] = None
+    imageHeight: Optional[float] = None
     isCheckbox: bool = False
     isCustom: bool = False
 

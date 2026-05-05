@@ -51,14 +51,16 @@
         <button type="button" id="whiteboardClearButton">Leeren</button>
         <button type="button" id="whiteboardUndoButton" title="Whiteboard: ein Schritt zurück" aria-label="Whiteboard: ein Schritt zurück">&#8592;</button>
         <button type="button" id="whiteboardRedoButton" title="Whiteboard: ein Schritt vor" aria-label="Whiteboard: ein Schritt vor">&#8594;</button>
+        <button type="button" id="signatureInsertButton" hidden>Fertig</button>
+        <button type="button" id="signatureCancelButton" hidden>Abbrechen</button>
       </div>
 
       <div class="toolbar-group edit-tools">
         <button type="button" id="selectToolButton">Auswahl</button>
         <button type="button" id="addTextButton">Text</button>
-        <button type="button" id="eraseTextButton">Abdecken</button>
         <button type="button" id="checkButton">Kreuzen</button>
         <button type="button" id="uncheckButton">Leeren</button>
+        <button type="button" id="signatureButton">Unterschrift</button>
       </div>
 
       <div class="toolbar-group undo-tools">
@@ -114,6 +116,8 @@
       <div id="pageContainer" hidden>
         <img id="backgroundImage" alt="" hidden>
         <div id="textLayer"></div>
+        <canvas id="signatureCanvas" hidden aria-label="Unterschrift"></canvas>
+        <div id="signatureCursor" hidden aria-hidden="true"></div>
       </div>
     </div>
   </div>
