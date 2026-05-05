@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PDF Editor</title>
-  <link rel="stylesheet" href="./styles.css?v=2026-05-05-signature-1">
+  <link rel="stylesheet" href="./styles.css?v=2026-05-05-toolbar-groups-1">
 </head>
 <body>
   <input type="file" id="webPdfInput" accept="application/pdf" hidden>
@@ -30,17 +30,17 @@
     </header>
 
     <div id="toolbar" aria-label="Werkzeuge">
-      <div class="toolbar-group file-tools">
+      <div class="toolbar-group file-tools" data-title="Datei">
         <button type="button" id="openButton">PDF laden</button>
       </div>
 
-      <div class="toolbar-group template-tools">
+      <div class="toolbar-group template-tools" data-title="Vorlage">
         <button type="button" id="templateLearningButton" hidden>Lernmodus</button>
         <input type="text" id="templateNameInput" placeholder="Vorlagenname" hidden>
         <button type="button" id="saveTemplateButton" hidden>Vorlage speichern</button>
       </div>
 
-      <div class="toolbar-group whiteboard-tools">
+      <div class="toolbar-group whiteboard-tools" data-title="Whiteboard">
         <button type="button" id="whiteboardPenButton">Stift</button>
         <button type="button" id="whiteboardEraserButton">Radierer</button>
         <label id="whiteboardColorLabel" for="whiteboardColorInput">Farbe</label>
@@ -53,31 +53,37 @@
         <button type="button" id="whiteboardRedoButton" title="Whiteboard: ein Schritt vor" aria-label="Whiteboard: ein Schritt vor">&#8594;</button>
       </div>
 
-      <div class="toolbar-group edit-tools">
+      <div class="toolbar-group edit-tools" data-title="Bearbeiten">
         <button type="button" id="selectToolButton">Auswahl</button>
         <button type="button" id="addTextButton">Text</button>
-        <button type="button" id="eraseTextButton">Abdecken</button>
         <button type="button" id="checkButton">Kreuzen</button>
         <button type="button" id="uncheckButton">Leeren</button>
         <button type="button" id="signatureButton">Signieren</button>
       </div>
 
-      <div class="toolbar-group signature-tools">
-        <label id="signatureColorLabel" for="signatureColorInput">Farbe</label>
-        <input type="color" id="signatureColorInput" value="#000000" aria-label="Signaturfarbe">
-        <label id="signatureThicknessLabel" for="signatureThicknessInput">Dicke</label>
-        <input type="range" id="signatureThicknessInput" min="1" max="18" step="1" value="3" aria-label="Signaturdicke">
-        <span id="signatureThicknessValue">3 px</span>
-        <button type="button" id="signatureClearButton">Leeren</button>
-        <button type="button" id="signatureDoneButton">Fertig</button>
-      </div>
-
-      <div class="toolbar-group undo-tools">
+      <div class="toolbar-group undo-tools" data-title="Verlauf">
         <button type="button" id="undoButton" title="Schritt zurück" aria-label="Schritt zurück">&#8630;</button>
         <button type="button" id="redoButton" title="Schritt vor" aria-label="Schritt vor">&#8631;</button>
       </div>
 
-      <div class="toolbar-group text-tools">
+      <div class="toolbar-group page-tools" data-title="Seiten">
+        <button type="button" id="prevButton" title="Vorherige Seite" aria-label="Vorherige Seite">&#8592; Vorige</button>
+        <button type="button" id="nextButton" title="Nächste Seite" aria-label="Nächste Seite">Nächste &#8594;</button>
+      </div>
+
+      <div class="toolbar-group zoom-tools" data-title="Ansicht">
+        <button type="button" id="zoomOutButton" title="Zoom -">-</button>
+        <button type="button" id="zoomFitButton" title="Zoom auf Standard zurücksetzen" aria-label="Zoom auf Standard zurücksetzen">Standard</button>
+        <button type="button" id="zoomInButton" title="Zoom +">+</button>
+      </div>
+
+      <div class="toolbar-group export-tools" data-title="Export">
+        <button type="button" id="saveDraftButton" hidden>Entwurf speichern</button>
+        <button type="button" id="exportButton">PDF exportieren</button>
+        <button type="button" id="revealButton">Export zeigen</button>
+      </div>
+
+      <div class="toolbar-group text-tools" data-title="Schrift">
         <label id="fontFamilyLabel" for="fontFamilySelect">Schrift</label>
         <select id="fontFamilySelect" aria-label="Schriftart">
           <option value="Helvetica">Arial</option>
@@ -91,21 +97,14 @@
         <button type="button" id="underlineButton" class="text-style-toggle" title="Unterstrichen" aria-label="Unterstrichen" aria-pressed="false">U</button>
       </div>
 
-      <div class="toolbar-group page-tools">
-        <button type="button" id="prevButton" title="Vorherige Seite" aria-label="Vorherige Seite">&#8592; Vorige</button>
-        <button type="button" id="nextButton" title="Nächste Seite" aria-label="Nächste Seite">Nächste &#8594;</button>
-      </div>
-
-      <div class="toolbar-group zoom-tools">
-        <button type="button" id="zoomOutButton" title="Zoom -">-</button>
-        <button type="button" id="zoomFitButton" title="Zoom auf Standard zurücksetzen" aria-label="Zoom auf Standard zurücksetzen">Standard</button>
-        <button type="button" id="zoomInButton" title="Zoom +">+</button>
-      </div>
-
-      <div class="toolbar-group export-tools">
-        <button type="button" id="saveDraftButton" hidden>Entwurf speichern</button>
-        <button type="button" id="exportButton">PDF exportieren</button>
-        <button type="button" id="revealButton">Export zeigen</button>
+      <div class="toolbar-group signature-tools" data-title="Signatur">
+        <label id="signatureColorLabel" for="signatureColorInput">Farbe</label>
+        <input type="color" id="signatureColorInput" value="#000000" aria-label="Signaturfarbe">
+        <label id="signatureThicknessLabel" for="signatureThicknessInput">Dicke</label>
+        <input type="range" id="signatureThicknessInput" min="1" max="18" step="1" value="3" aria-label="Signaturdicke">
+        <span id="signatureThicknessValue">3 px</span>
+        <button type="button" id="signatureCancelButton">Abbrechen</button>
+        <button type="button" id="signatureDoneButton">Fertig</button>
       </div>
     </div>
 
@@ -126,10 +125,11 @@
         <img id="backgroundImage" alt="" hidden>
         <div id="textLayer"></div>
         <canvas id="signatureCanvas" hidden aria-label="Unterschrift zeichnen"></canvas>
+        <div id="signatureCursor" hidden aria-hidden="true"></div>
       </div>
     </div>
   </div>
 
-  <script src="./renderer.js?v=2026-05-05-signature-1"></script>
+  <script src="./renderer.js?v=2026-05-05-toolbar-groups-1"></script>
 </body>
 </html>
