@@ -1919,8 +1919,7 @@ function syncSignatureCursorFromEvent(event) {
   return point;
 }
 
-function createSignatureBlockFromStroke(stroke) {
-  const page = getCurrentPageModel();
+function normalizeSignatureStroke(stroke) {
   const points = Array.isArray(stroke?.points)
     ? stroke.points
       .map((point) => ({
@@ -1929,12 +1928,32 @@ function createSignatureBlockFromStroke(stroke) {
       }))
       .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
     : [];
-  if (!page || points.length === 0) {
+  if (points.length === 0) {
     return null;
   }
 
   const strokeWidth = Math.max(SIGNATURE_MIN_STROKE_WIDTH, Number(stroke.width) || SIGNATURE_MIN_STROKE_WIDTH);
-  const padding = Math.max(0.6, strokeWidth * 0.75);
+  return {
+    color: stroke.color || "#000000",
+    width: strokeWidth,
+    points,
+  };
+}
+
+function getSignatureBoundsForStrokes(strokes, page) {
+  const normalizedStrokes = strokes
+    .map(normalizeSignatureStroke)
+    .filter(Boolean);
+  const points = normalizedStrokes.flatMap((stroke) => stroke.points);
+  if (!page || points.length === 0) {
+    return null;
+  }
+
+  const maxStrokeWidth = Math.max(
+    SIGNATURE_MIN_STROKE_WIDTH,
+    ...normalizedStrokes.map((stroke) => Number(stroke.width) || SIGNATURE_MIN_STROKE_WIDTH),
+  );
+  const padding = Math.max(0.6, maxStrokeWidth * 0.75);
   const minX = Math.min(...points.map((point) => point.x));
   const minY = Math.min(...points.map((point) => point.y));
   const maxX = Math.max(...points.map((point) => point.x));
@@ -1946,7 +1965,7 @@ function createSignatureBlockFromStroke(stroke) {
     y1: maxY + padding,
   }, page);
 
-  const minimumSize = Math.max(1, strokeWidth * 2);
+  const minimumSize = Math.max(1, maxStrokeWidth * 2);
   if (bbox.x1 - bbox.x0 < minimumSize) {
     const center = (bbox.x0 + bbox.x1) / 2;
     bbox.x0 = clamp(center - (minimumSize / 2), 0, Math.max(0, page.width - minimumSize));
@@ -1958,6 +1977,47 @@ function createSignatureBlockFromStroke(stroke) {
     bbox.y1 = Math.min(page.height, bbox.y0 + minimumSize);
   }
 
+  return bbox;
+}
+
+function syncSignatureBlockGeometry(block, strokes) {
+  const page = state.document?.pages?.find((entry) => entry.pageNumber === block.page) || getCurrentPageModel();
+  const normalizedStrokes = strokes
+    .map(normalizeSignatureStroke)
+    .filter(Boolean);
+  const bbox = getSignatureBoundsForStrokes(normalizedStrokes, page);
+  if (!bbox) {
+    return false;
+  }
+
+  block.bbox = bbox;
+  block.rect = { ...bbox };
+  block.quads = [{
+    x0: bbox.x0,
+    y0: bbox.y0,
+    x1: bbox.x1,
+    y1: bbox.y0,
+    x2: bbox.x1,
+    y2: bbox.y1,
+    x3: bbox.x0,
+    y3: bbox.y1,
+  }];
+  block.inkPayload = { strokes: normalizedStrokes };
+  block.color = normalizedStrokes[0]?.color || block.color || "#000000";
+  return true;
+}
+
+function createSignatureBlockFromStrokes(strokes) {
+  const page = getCurrentPageModel();
+  const normalizedStrokes = strokes
+    .map(normalizeSignatureStroke)
+    .filter(Boolean);
+  const bbox = getSignatureBoundsForStrokes(normalizedStrokes, page);
+  if (!page || !bbox) {
+    return null;
+  }
+
+  const firstStroke = normalizedStrokes[0] || {};
   return {
     id: createBlockId(`signature-page-${state.currentPage}`),
     page: state.currentPage,
@@ -1982,7 +2042,7 @@ function createSignatureBlockFromStroke(stroke) {
     fontFamily: "Helvetica",
     fontKey: "Helvetica",
     fontSize: 1,
-    color: stroke.color || "#000000",
+    color: firstStroke.color || "#000000",
     lineHeight: 1,
     align: "left",
     rotation: 0,
@@ -1998,13 +2058,48 @@ function createSignatureBlockFromStroke(stroke) {
     isCheckbox: false,
     isCustom: true,
     inkPayload: {
-      strokes: [{
-        color: stroke.color || "#000000",
-        width: strokeWidth,
-        points,
-      }],
+      strokes: normalizedStrokes,
     },
   };
+}
+
+function createSignatureBlockFromStroke(stroke) {
+  return createSignatureBlockFromStrokes([stroke]);
+}
+
+function getActiveSessionSignatureBlock() {
+  for (const blockId of state.signature.sessionBlockIds) {
+    const block = getBlockById(blockId);
+    if (isSignatureBlock(block) && block.page === state.currentPage) {
+      return block;
+    }
+  }
+  return null;
+}
+
+function appendStrokeToSessionSignature(stroke) {
+  const normalizedStroke = normalizeSignatureStroke(stroke);
+  if (!normalizedStroke) {
+    return null;
+  }
+
+  const existingBlock = getActiveSessionSignatureBlock();
+  if (existingBlock) {
+    const strokes = [...getSignatureStrokes(existingBlock), normalizedStroke];
+    if (!syncSignatureBlockGeometry(existingBlock, strokes)) {
+      return null;
+    }
+    state.signature.sessionBlockIds = [existingBlock.id];
+    return existingBlock;
+  }
+
+  const block = createSignatureBlockFromStrokes([normalizedStroke]);
+  if (!block) {
+    return null;
+  }
+  state.document.blocks.push(block);
+  state.signature.sessionBlockIds = [block.id];
+  return block;
 }
 
 function finishSignatureStroke(pointerId = null) {
@@ -2017,13 +2112,11 @@ function finishSignatureStroke(pointerId = null) {
     return;
   }
 
-  const block = createSignatureBlockFromStroke(stroke);
+  const block = appendStrokeToSessionSignature(stroke);
   if (!block) {
     return;
   }
 
-  state.document.blocks.push(block);
-  state.signature.sessionBlockIds.push(block.id);
   state.selectedBlockId = null;
   state.editingBlockId = null;
   renderTextLayer();
@@ -4291,6 +4384,7 @@ async function applyImportedDocument(documentModel) {
   state.signature.currentStroke = null;
   state.signature.lastPoint = null;
   state.signature.pointerId = null;
+  state.signature.sessionBlockIds = [];
   state.lastExportPath = null;
   state.backgroundLoadToken += 1;
   state.renderedBackgroundPage = null;
