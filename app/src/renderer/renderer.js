@@ -1,3 +1,5 @@
+const SIGNATURE_DEFAULT_COLOR = "#145cff";
+
 const state = {
   serviceBaseUrl: null,
   document: null,
@@ -57,9 +59,11 @@ const state = {
     lastPoint: null,
     pointerId: null,
     currentStroke: null,
-    color: "#000000",
+    color: SIGNATURE_DEFAULT_COLOR,
     penSize: 3,
     cursorVisible: false,
+    pendingStrokes: [],
+    undoneStrokes: [],
     sessionBlockIds: [],
   },
 };
@@ -83,6 +87,9 @@ const DOCUMENT_HISTORY_LIMIT = 80;
 const SIGNATURE_DEFAULT_PEN_SIZE = 3;
 const SIGNATURE_MAX_PEN_SIZE = 18;
 const SIGNATURE_MIN_STROKE_WIDTH = 0.1;
+const SIGNATURE_POINT_MIN_DISTANCE_PX = 0.18;
+const SIGNATURE_PRESSURE_MIN = 0.68;
+const SIGNATURE_PRESSURE_MAX = 1.24;
 const MANUAL_TEXT_FONT_OPTIONS = [
   {
     value: "Helvetica",
@@ -135,6 +142,8 @@ const el = {
   signatureThicknessLabel: document.getElementById("signatureThicknessLabel"),
   signatureThicknessInput: document.getElementById("signatureThicknessInput"),
   signatureThicknessValue: document.getElementById("signatureThicknessValue"),
+  signatureUndoButton: document.getElementById("signatureUndoButton"),
+  signatureRedoButton: document.getElementById("signatureRedoButton"),
   signatureCancelButton: document.getElementById("signatureCancelButton"),
   signatureDoneButton: document.getElementById("signatureDoneButton"),
   undoButton: document.getElementById("undoButton"),
@@ -1795,6 +1804,289 @@ function clearSignatureCanvas() {
   context.restore();
 }
 
+function hasPendingSignatureStrokes() {
+  return Array.isArray(state.signature.pendingStrokes) && state.signature.pendingStrokes.length > 0;
+}
+
+function hasUndoneSignatureStrokes() {
+  return Array.isArray(state.signature.undoneStrokes) && state.signature.undoneStrokes.length > 0;
+}
+
+function canUndoSignatureStroke() {
+  return state.signature.active && !state.signature.isDrawing && hasPendingSignatureStrokes();
+}
+
+function canRedoSignatureStroke() {
+  return state.signature.active && !state.signature.isDrawing && hasUndoneSignatureStrokes();
+}
+
+function normalizeSignaturePressure(value) {
+  const pressure = Number(value);
+  if (!Number.isFinite(pressure) || pressure <= 0) {
+    return 1;
+  }
+  return clamp(pressure, SIGNATURE_PRESSURE_MIN, SIGNATURE_PRESSURE_MAX);
+}
+
+function getSignaturePointPressure(event) {
+  const rawPressure = Number(event.pressure);
+  if (!Number.isFinite(rawPressure) || rawPressure <= 0) {
+    return 1;
+  }
+  if (event.pointerType === "pen") {
+    return clamp(0.56 + (rawPressure * 0.72), SIGNATURE_PRESSURE_MIN, SIGNATURE_PRESSURE_MAX);
+  }
+  if (event.pointerType === "touch") {
+    return clamp(0.82 + (rawPressure * 0.38), SIGNATURE_PRESSURE_MIN, SIGNATURE_PRESSURE_MAX);
+  }
+  return 1;
+}
+
+function signaturePressureWidthFactor(point) {
+  return normalizeSignaturePressure(point?.pressure);
+}
+
+function shouldAppendSignaturePoint(stroke, point) {
+  if (!stroke || !point) {
+    return false;
+  }
+
+  const points = Array.isArray(stroke.points) ? stroke.points : [];
+  const last = points[points.length - 1];
+  if (!last) {
+    return true;
+  }
+
+  const dx = (point.pdfX - last.x) * state.zoom;
+  const dy = (point.pdfY - last.y) * state.zoom;
+  return Math.hypot(dx, dy) >= SIGNATURE_POINT_MIN_DISTANCE_PX;
+}
+
+function appendSignatureStrokePoint(point) {
+  const stroke = state.signature.currentStroke;
+  if (!stroke || !shouldAppendSignaturePoint(stroke, point)) {
+    return false;
+  }
+  stroke.points.push({ x: point.pdfX, y: point.pdfY, pressure: point.pressure });
+  return true;
+}
+
+function getSignatureEventPoints(event) {
+  const sourceEvents = typeof event.getCoalescedEvents === "function"
+    ? event.getCoalescedEvents()
+    : [];
+  const events = sourceEvents.length > 0 ? sourceEvents : [event];
+  return events.map((entry) => getSignaturePoint(entry));
+}
+
+function drawSmoothSignaturePath(context, points) {
+  if (points.length === 0) {
+    return;
+  }
+
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  if (points.length === 2) {
+    context.lineTo(points[1].x, points[1].y);
+    context.stroke();
+    return;
+  }
+
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const control = points[index];
+    const next = points[index + 1];
+    const isLastControl = index === points.length - 2;
+    const end = isLastControl
+      ? next
+      : {
+        x: (control.x + next.x) / 2,
+        y: (control.y + next.y) / 2,
+      };
+    context.quadraticCurveTo(control.x, control.y, end.x, end.y);
+  }
+  context.stroke();
+}
+
+function createSmoothSignatureSegments(points) {
+  if (points.length < 2) {
+    return [];
+  }
+  if (points.length === 2) {
+    return [{
+      type: "line",
+      start: points[0],
+      end: points[1],
+      pressure: (signaturePressureWidthFactor(points[0]) + signaturePressureWidthFactor(points[1])) / 2,
+    }];
+  }
+
+  const segments = [];
+  let current = points[0];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const control = points[index];
+    const next = points[index + 1];
+    const isLastControl = index === points.length - 2;
+    const end = isLastControl
+      ? next
+      : {
+        x: (control.x + next.x) / 2,
+        y: (control.y + next.y) / 2,
+        pressure: (signaturePressureWidthFactor(control) + signaturePressureWidthFactor(next)) / 2,
+      };
+    segments.push({
+      type: "quadratic",
+      start: current,
+      control,
+      end,
+      pressure: (
+        signaturePressureWidthFactor(current)
+        + signaturePressureWidthFactor(control)
+        + signaturePressureWidthFactor(end)
+      ) / 3,
+    });
+    current = end;
+  }
+  return segments;
+}
+
+function drawSmoothSignatureStroke(context, points, baseStrokeWidth) {
+  const segments = createSmoothSignatureSegments(points);
+  for (const segment of segments) {
+    context.lineWidth = Math.max(1, baseStrokeWidth * segment.pressure);
+    context.beginPath();
+    context.moveTo(segment.start.x, segment.start.y);
+    if (segment.type === "line") {
+      context.lineTo(segment.end.x, segment.end.y);
+    } else {
+      context.quadraticCurveTo(segment.control.x, segment.control.y, segment.end.x, segment.end.y);
+    }
+    context.stroke();
+  }
+}
+
+function createSmoothSignatureSvgPath(points) {
+  if (points.length === 0) {
+    return "";
+  }
+  if (points.length === 1) {
+    return `M ${points[0].x} ${points[0].y}`;
+  }
+  if (points.length === 2) {
+    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+  }
+
+  const commands = [`M ${points[0].x} ${points[0].y}`];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const control = points[index];
+    const next = points[index + 1];
+    const isLastControl = index === points.length - 2;
+    const end = isLastControl
+      ? next
+      : {
+        x: (control.x + next.x) / 2,
+        y: (control.y + next.y) / 2,
+      };
+    commands.push(`Q ${control.x} ${control.y} ${end.x} ${end.y}`);
+  }
+  return commands.join(" ");
+}
+
+function createSmoothSignatureSvgSegments(points) {
+  return createSmoothSignatureSegments(points).map((segment) => {
+    const d = segment.type === "line"
+      ? `M ${segment.start.x} ${segment.start.y} L ${segment.end.x} ${segment.end.y}`
+      : `M ${segment.start.x} ${segment.start.y} Q ${segment.control.x} ${segment.control.y} ${segment.end.x} ${segment.end.y}`;
+    return { d, pressure: segment.pressure };
+  });
+}
+
+function drawStoredSignatureStroke(stroke) {
+  const normalizedStroke = normalizeSignatureStroke(stroke);
+  if (!normalizedStroke) {
+    return;
+  }
+
+  const context = getSignatureContext();
+  const points = normalizedStroke.points.map((point) => ({
+    x: point.x * state.zoom,
+    y: point.y * state.zoom,
+    pressure: point.pressure,
+  }));
+  const strokeWidth = Math.max(1, normalizedStroke.width * state.zoom);
+  context.save();
+  context.strokeStyle = normalizedStroke.color || SIGNATURE_DEFAULT_COLOR;
+  context.fillStyle = normalizedStroke.color || SIGNATURE_DEFAULT_COLOR;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.shadowColor = "rgba(0, 0, 0, 0.08)";
+  context.shadowBlur = Math.max(0.15, strokeWidth * 0.18);
+  context.shadowOffsetX = 0;
+  context.shadowOffsetY = 0;
+
+  if (points.length === 1) {
+    context.beginPath();
+    context.arc(points[0].x, points[0].y, (strokeWidth * signaturePressureWidthFactor(points[0])) / 2, 0, Math.PI * 2);
+    context.fill();
+    context.restore();
+    return;
+  }
+
+  drawSmoothSignatureStroke(context, points, strokeWidth);
+  context.restore();
+}
+
+function redrawSignatureCanvasStrokes() {
+  if (!el.signatureCanvas) {
+    return;
+  }
+
+  for (const stroke of state.signature.pendingStrokes) {
+    drawStoredSignatureStroke(stroke);
+  }
+  if (state.signature.currentStroke) {
+    drawStoredSignatureStroke(state.signature.currentStroke);
+  }
+}
+
+function updateSignatureHistoryButtons() {
+  if (el.signatureUndoButton) {
+    el.signatureUndoButton.disabled = !canUndoSignatureStroke();
+  }
+  if (el.signatureRedoButton) {
+    el.signatureRedoButton.disabled = !canRedoSignatureStroke();
+  }
+}
+
+function moveSignatureStrokeHistory(step) {
+  if (!state.signature.active || state.signature.isDrawing) {
+    return;
+  }
+
+  if (step < 0) {
+    const stroke = state.signature.pendingStrokes.pop();
+    if (!stroke) {
+      updateSignatureHistoryButtons();
+      return;
+    }
+    state.signature.undoneStrokes.push(stroke);
+    clearSignatureCanvas();
+    redrawSignatureCanvasStrokes();
+    setStatus("Signatur: ein Schritt zurueck.");
+  } else if (step > 0) {
+    const stroke = state.signature.undoneStrokes.pop();
+    if (!stroke) {
+      updateSignatureHistoryButtons();
+      return;
+    }
+    state.signature.pendingStrokes.push(stroke);
+    clearSignatureCanvas();
+    redrawSignatureCanvasStrokes();
+    setStatus("Signatur: ein Schritt vor.");
+  }
+
+  updateSignatureHistoryButtons();
+}
+
 function resizeSignatureCanvas() {
   if (!el.signatureCanvas) {
     return;
@@ -1826,6 +2118,7 @@ function resizeSignatureCanvas() {
   context.lineCap = "round";
   context.lineJoin = "round";
   context.clearRect(0, 0, displayWidth, displayHeight);
+  redrawSignatureCanvasStrokes();
 }
 
 function getSignaturePoint(event) {
@@ -1839,26 +2132,8 @@ function getSignaturePoint(event) {
     y: screenY,
     pdfX,
     pdfY,
+    pressure: getSignaturePointPressure(event),
   };
-}
-
-function drawSignatureSegment(fromPoint, toPoint) {
-  const context = getSignatureContext();
-  const penSize = getSignaturePenSize();
-  context.save();
-  context.strokeStyle = state.signature.color;
-  context.fillStyle = state.signature.color;
-  context.lineWidth = penSize;
-  context.lineCap = "round";
-  context.lineJoin = "round";
-  context.beginPath();
-  context.moveTo(fromPoint.x, fromPoint.y);
-  context.lineTo(toPoint.x, toPoint.y);
-  context.stroke();
-  context.beginPath();
-  context.arc(toPoint.x, toPoint.y, penSize / 2, 0, Math.PI * 2);
-  context.fill();
-  context.restore();
 }
 
 function stopSignatureDrawing(pointerId = null) {
@@ -1925,6 +2200,7 @@ function normalizeSignatureStroke(stroke) {
       .map((point) => ({
         x: Number(point.x),
         y: Number(point.y),
+        pressure: normalizeSignaturePressure(point.pressure),
       }))
       .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
     : [];
@@ -1934,7 +2210,7 @@ function normalizeSignatureStroke(stroke) {
 
   const strokeWidth = Math.max(SIGNATURE_MIN_STROKE_WIDTH, Number(stroke.width) || SIGNATURE_MIN_STROKE_WIDTH);
   return {
-    color: stroke.color || "#000000",
+    color: stroke.color || SIGNATURE_DEFAULT_COLOR,
     width: strokeWidth,
     points,
   };
@@ -2003,7 +2279,7 @@ function syncSignatureBlockGeometry(block, strokes) {
     y3: bbox.y1,
   }];
   block.inkPayload = { strokes: normalizedStrokes };
-  block.color = normalizedStrokes[0]?.color || block.color || "#000000";
+  block.color = normalizedStrokes[0]?.color || block.color || SIGNATURE_DEFAULT_COLOR;
   return true;
 }
 
@@ -2042,7 +2318,7 @@ function createSignatureBlockFromStrokes(strokes) {
     fontFamily: "Helvetica",
     fontKey: "Helvetica",
     fontSize: 1,
-    color: firstStroke.color || "#000000",
+    color: firstStroke.color || SIGNATURE_DEFAULT_COLOR,
     lineHeight: 1,
     align: "left",
     rotation: 0,
@@ -2106,23 +2382,57 @@ function finishSignatureStroke(pointerId = null) {
   const stroke = state.signature.currentStroke;
   state.signature.currentStroke = null;
   stopSignatureDrawing(pointerId);
-  clearSignatureCanvas();
 
   if (!stroke || !hasEditableDocument()) {
     return;
   }
 
-  const block = appendStrokeToSessionSignature(stroke);
-  if (!block) {
+  const normalizedStroke = normalizeSignatureStroke(stroke);
+  if (!normalizedStroke) {
     return;
   }
 
+  state.signature.pendingStrokes.push(normalizedStroke);
+  state.signature.undoneStrokes = [];
+  clearSignatureCanvas();
+  redrawSignatureCanvasStrokes();
   state.selectedBlockId = null;
+  state.editingBlockId = null;
+  syncSelectedBlock();
+  updateSignatureHistoryButtons();
+  setStatus("Unterschrift aufgenommen. Mit Fertig setzen oder Abbrechen verwerfen.");
+}
+
+function commitSignatureSession() {
+  const strokes = Array.isArray(state.signature.pendingStrokes)
+    ? state.signature.pendingStrokes
+      .map(normalizeSignatureStroke)
+      .filter(Boolean)
+    : [];
+  if (!hasEditableDocument() || strokes.length === 0) {
+    state.signature.pendingStrokes = [];
+    state.signature.undoneStrokes = [];
+    return null;
+  }
+
+  const block = createSignatureBlockFromStrokes(strokes);
+  if (!block) {
+    state.signature.pendingStrokes = [];
+    state.signature.undoneStrokes = [];
+    return null;
+  }
+
+  state.document.blocks.push(block);
+  state.signature.pendingStrokes = [];
+  state.signature.undoneStrokes = [];
+  state.signature.sessionBlockIds = [block.id];
+  state.selectedBlockId = block.id;
   state.editingBlockId = null;
   renderTextLayer();
   commitDocumentHistory();
   scheduleDraftSave();
-  setStatus("Unterschrift gesetzt.");
+  setStatus("Unterschrift gesetzt. Du kannst sie jetzt verschieben.");
+  return block;
 }
 
 function renderSignatureBlock(block, scale) {
@@ -2154,6 +2464,7 @@ function renderSignatureBlock(block, scale) {
         .map((point) => ({
           x: Number(point.x) - block.bbox.x0,
           y: Number(point.y) - block.bbox.y0,
+          pressure: normalizeSignaturePressure(point.pressure),
         }))
         .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
       : [];
@@ -2166,20 +2477,22 @@ function renderSignatureBlock(block, scale) {
       const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
       circle.setAttribute("cx", String(points[0].x));
       circle.setAttribute("cy", String(points[0].y));
-      circle.setAttribute("r", String(strokeWidth / 2));
-      circle.setAttribute("fill", stroke.color || block.color || "#000000");
+      circle.setAttribute("r", String((strokeWidth * signaturePressureWidthFactor(points[0])) / 2));
+      circle.setAttribute("fill", stroke.color || block.color || SIGNATURE_DEFAULT_COLOR);
       svg.appendChild(circle);
       continue;
     }
 
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" "));
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", stroke.color || block.color || "#000000");
-    path.setAttribute("stroke-width", String(strokeWidth));
-    path.setAttribute("stroke-linecap", "round");
-    path.setAttribute("stroke-linejoin", "round");
-    svg.appendChild(path);
+    for (const segment of createSmoothSignatureSvgSegments(points)) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", segment.d);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", stroke.color || block.color || SIGNATURE_DEFAULT_COLOR);
+      path.setAttribute("stroke-width", String(Math.max(SIGNATURE_MIN_STROKE_WIDTH, strokeWidth * segment.pressure)));
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(path);
+    }
   }
 
   node.appendChild(svg);
@@ -2228,6 +2541,8 @@ function cancelSignatureMode() {
 
   const idsToRemove = new Set(state.signature.sessionBlockIds);
   state.signature.currentStroke = null;
+  state.signature.pendingStrokes = [];
+  state.signature.undoneStrokes = [];
   stopSignatureDrawing();
   clearDragState();
   clearSignatureCanvas();
@@ -2261,11 +2576,16 @@ function setSignatureMode(active) {
   if (!nextActive) {
     finishSignatureStroke();
   }
+  const committedSignature = nextActive ? null : commitSignatureSession();
 
   state.signature.active = nextActive;
   state.activePdfTool = nextActive ? "signature" : "select";
-  clearSelection();
+  if (!committedSignature) {
+    clearSelection();
+  }
   if (nextActive) {
+    state.signature.pendingStrokes = [];
+    state.signature.undoneStrokes = [];
     state.signature.sessionBlockIds = [];
     resizeSignatureCanvas();
     updateSignatureCursorAppearance();
@@ -2273,8 +2593,16 @@ function setSignatureMode(active) {
   } else {
     clearSignatureCanvas();
     hideSignatureCursor();
+    state.signature.pendingStrokes = [];
+    state.signature.undoneStrokes = [];
     state.signature.sessionBlockIds = [];
-    setStatus("Signieren beendet.");
+    if (committedSignature) {
+      state.selectedBlockId = committedSignature.id;
+      state.editingBlockId = null;
+      syncSelectedBlock();
+    } else {
+      setStatus("Signieren beendet.");
+    }
   }
   updateButtons();
 }
@@ -3051,6 +3379,8 @@ function updateSignatureToolButtons() {
     state.signature.currentStroke = null;
     state.signature.active = false;
     state.activePdfTool = "select";
+    state.signature.pendingStrokes = [];
+    state.signature.undoneStrokes = [];
     state.signature.sessionBlockIds = [];
   }
 
@@ -3063,6 +3393,8 @@ function updateSignatureToolButtons() {
     el.signatureThicknessLabel,
     el.signatureThicknessInput,
     el.signatureThicknessValue,
+    el.signatureUndoButton,
+    el.signatureRedoButton,
     el.signatureCancelButton,
     el.signatureDoneButton,
   ];
@@ -3091,6 +3423,7 @@ function updateSignatureToolButtons() {
   if (el.signatureThicknessValue) {
     el.signatureThicknessValue.textContent = `${penSize} px`;
   }
+  updateSignatureHistoryButtons();
   if (el.signatureCanvas) {
     el.signatureCanvas.hidden = !visible;
     if (visible) {
@@ -4384,6 +4717,8 @@ async function applyImportedDocument(documentModel) {
   state.signature.currentStroke = null;
   state.signature.lastPoint = null;
   state.signature.pointerId = null;
+  state.signature.pendingStrokes = [];
+  state.signature.undoneStrokes = [];
   state.signature.sessionBlockIds = [];
   state.lastExportPath = null;
   state.backgroundLoadToken += 1;
@@ -4651,8 +4986,16 @@ el.signatureCancelButton?.addEventListener("click", () => {
   cancelSignatureMode();
 });
 
+el.signatureUndoButton?.addEventListener("click", () => {
+  moveSignatureStrokeHistory(-1);
+});
+
+el.signatureRedoButton?.addEventListener("click", () => {
+  moveSignatureStrokeHistory(1);
+});
+
 el.signatureColorInput?.addEventListener("input", () => {
-  state.signature.color = el.signatureColorInput.value || "#000000";
+  state.signature.color = el.signatureColorInput.value || SIGNATURE_DEFAULT_COLOR;
   updateSignatureCursorAppearance();
   updateSignatureToolButtons();
 });
@@ -4835,23 +5178,26 @@ el.signatureCanvas?.addEventListener("pointerdown", (event) => {
   const stroke = {
     color: state.signature.color,
     width: getSignatureStrokeWidthPdf(),
-    points: [{ x: point.pdfX, y: point.pdfY }],
+    points: [{ x: point.pdfX, y: point.pdfY, pressure: point.pressure }],
   };
   state.signature.isDrawing = true;
   state.signature.lastPoint = point;
   state.signature.pointerId = event.pointerId;
   state.signature.currentStroke = stroke;
   el.signatureCanvas.setPointerCapture(event.pointerId);
-  drawSignatureSegment(point, point);
+  clearSignatureCanvas();
+  redrawSignatureCanvasStrokes();
 });
 
-el.signatureCanvas?.addEventListener("pointermove", (event) => {
+function handleSignaturePointerMove(event) {
   if (!state.signature.active) {
     hideSignatureCursor();
     return;
   }
 
-  const point = syncSignatureCursorFromEvent(event);
+  const points = getSignatureEventPoints(event);
+  const point = points[points.length - 1] || getSignaturePoint(event);
+  showSignatureCursor(point, event.pointerType);
   if (state.drag) {
     event.preventDefault();
     event.stopPropagation();
@@ -4866,10 +5212,19 @@ el.signatureCanvas?.addEventListener("pointermove", (event) => {
 
   event.preventDefault();
   event.stopPropagation();
-  state.signature.currentStroke?.points.push({ x: point.pdfX, y: point.pdfY });
-  drawSignatureSegment(state.signature.lastPoint, point);
-  state.signature.lastPoint = point;
-});
+  let changed = false;
+  for (const nextPoint of points) {
+    changed = appendSignatureStrokePoint(nextPoint) || changed;
+  }
+  if (changed) {
+    clearSignatureCanvas();
+    redrawSignatureCanvasStrokes();
+    state.signature.lastPoint = point;
+  }
+}
+
+el.signatureCanvas?.addEventListener("pointermove", handleSignaturePointerMove);
+el.signatureCanvas?.addEventListener("pointerrawupdate", handleSignaturePointerMove);
 
 el.signatureCanvas?.addEventListener("pointerup", (event) => {
   if (!state.signature.active) {
@@ -4895,7 +5250,12 @@ el.signatureCanvas?.addEventListener("pointercancel", (event) => {
 
 el.signatureCanvas?.addEventListener("pointerleave", () => {
   if (!state.signature.isDrawing && !state.drag) {
-    clearSignatureCanvas();
+    if (hasPendingSignatureStrokes()) {
+      clearSignatureCanvas();
+      redrawSignatureCanvasStrokes();
+    } else {
+      clearSignatureCanvas();
+    }
     hideSignatureCursor();
   }
 });

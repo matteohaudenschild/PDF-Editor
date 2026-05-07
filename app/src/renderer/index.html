@@ -99,10 +99,12 @@
 
       <div class="toolbar-group signature-tools" data-title="Signatur">
         <label id="signatureColorLabel" for="signatureColorInput">Farbe</label>
-        <input type="color" id="signatureColorInput" value="#000000" aria-label="Signaturfarbe">
+        <input type="color" id="signatureColorInput" value="#145cff" aria-label="Signaturfarbe">
         <label id="signatureThicknessLabel" for="signatureThicknessInput">Dicke</label>
         <input type="range" id="signatureThicknessInput" min="1" max="18" step="1" value="3" aria-label="Signaturdicke">
         <span id="signatureThicknessValue">3 px</span>
+        <button type="button" id="signatureUndoButton" title="Signatur: ein Schritt zur&uuml;ck" aria-label="Signatur: ein Schritt zur&uuml;ck">&#8630;</button>
+        <button type="button" id="signatureRedoButton" title="Signatur: ein Schritt vor" aria-label="Signatur: ein Schritt vor">&#8631;</button>
         <button type="button" id="signatureCancelButton">Abbrechen</button>
         <button type="button" id="signatureDoneButton">Fertig</button>
       </div>

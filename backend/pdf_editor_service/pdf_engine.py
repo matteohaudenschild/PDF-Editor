@@ -7221,13 +7221,23 @@ def _is_manual_text_block(block: TextBlock) -> bool:
     return _is_manual_overlay_block(block) and str(block.groupKind or "") == "manual-text"
 
 
-def _ink_signature_points(stroke: object) -> list[tuple[float, float]]:
+def _ink_signature_pressure(value: object) -> float:
+    try:
+        pressure = float(value)
+    except (TypeError, ValueError):
+        pressure = 1.0
+    if not math.isfinite(pressure) or pressure <= 0:
+        return 1.0
+    return max(0.68, min(pressure, 1.24))
+
+
+def _ink_signature_points(stroke: object) -> list[tuple[float, float, float]]:
     if not isinstance(stroke, dict):
         return []
     raw_points = stroke.get("points")
     if not isinstance(raw_points, list):
         return []
-    points: list[tuple[float, float]] = []
+    points: list[tuple[float, float, float]] = []
     for point in raw_points:
         if not isinstance(point, dict):
             continue
@@ -7237,7 +7247,7 @@ def _ink_signature_points(stroke: object) -> list[tuple[float, float]]:
         except (TypeError, ValueError):
             continue
         if math.isfinite(x) and math.isfinite(y):
-            points.append((x, y))
+            points.append((x, y, _ink_signature_pressure(point.get("pressure"))))
     return points
 
 
@@ -7249,6 +7259,53 @@ def _ink_signature_stroke_width(stroke: object) -> float:
     except (TypeError, ValueError):
         width = 1.0
     return max(0.1, min(width, 48.0))
+
+
+def _ink_signature_smooth_quadratics(
+    points: list[tuple[float, float, float]],
+) -> list[tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]]:
+    if len(points) < 3:
+        return []
+
+    segments: list[tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]] = []
+    current = points[0]
+    for index in range(1, len(points) - 1):
+        control = points[index]
+        next_point = points[index + 1]
+        if index == len(points) - 2:
+            end = next_point
+        else:
+            end = (
+                (control[0] + next_point[0]) / 2,
+                (control[1] + next_point[1]) / 2,
+                (_ink_signature_pressure(control[2]) + _ink_signature_pressure(next_point[2])) / 2,
+            )
+        segments.append((current, control, end))
+        current = end
+    return segments
+
+
+def _quadratic_to_cubic(
+    start: tuple[float, float, float],
+    control: tuple[float, float, float],
+    end: tuple[float, float, float],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    control_1 = (
+        start[0] + (2.0 / 3.0) * (control[0] - start[0]),
+        start[1] + (2.0 / 3.0) * (control[1] - start[1]),
+    )
+    control_2 = (
+        end[0] + (2.0 / 3.0) * (control[0] - end[0]),
+        end[1] + (2.0 / 3.0) * (control[1] - end[1]),
+    )
+    return control_1, control_2
+
+
+def _ink_signature_segment_width(base_width: float, *points: tuple[float, float, float]) -> float:
+    if not points:
+        return base_width
+    pressure = sum(_ink_signature_pressure(point[2]) for point in points) / len(points)
+    return max(0.1, base_width * pressure)
 
 
 def _draw_ink_signature_block(page: pymupdf.Page, block: TextBlock) -> None:
@@ -7273,24 +7330,46 @@ def _draw_ink_signature_block(page: pymupdf.Page, block: TextBlock) -> None:
             color = (0, 0, 0)
         width = _ink_signature_stroke_width(stroke)
         if len(points) == 1:
-            x, y = points[0]
-            radius = max(width / 2, 0.2)
+            x, y, pressure = points[0]
+            dot_width = _ink_signature_segment_width(width, points[0])
+            radius = max(dot_width / 2, 0.2)
             page.draw_line(
                 pdf_point(x - radius, y),
                 pdf_point(x + radius, y),
                 color=color,
-                width=width,
+                width=dot_width,
                 overlay=True,
             )
             continue
-        for start, end in zip(points, points[1:]):
+        if len(points) == 2:
+            start, end = points
             page.draw_line(
                 pdf_point(start[0], start[1]),
                 pdf_point(end[0], end[1]),
                 color=color,
-                width=width,
+                width=_ink_signature_segment_width(width, start, end),
                 overlay=True,
             )
+            continue
+
+        for start, control, end in _ink_signature_smooth_quadratics(points):
+            control_1, control_2 = _quadratic_to_cubic(start, control, end)
+            shape = page.new_shape()
+            shape.draw_bezier(
+                pdf_point(start[0], start[1]),
+                pdf_point(control_1[0], control_1[1]),
+                pdf_point(control_2[0], control_2[1]),
+                pdf_point(end[0], end[1]),
+            )
+            shape.finish(
+                width=_ink_signature_segment_width(width, start, control, end),
+                color=color,
+                fill=None,
+                lineCap=1,
+                lineJoin=1,
+                closePath=False,
+            )
+            shape.commit(overlay=True)
 
 
 def _manual_text_descender_padding(font_size: float) -> float:

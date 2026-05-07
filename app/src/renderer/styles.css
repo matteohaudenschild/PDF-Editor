@@ -1257,6 +1257,8 @@ body.signature-mode #signatureCanvas {
 
 #whiteboardUndoButton,
 #whiteboardRedoButton,
+#signatureUndoButton,
+#signatureRedoButton,
 #undoButton,
 #redoButton,
 #zoomOutButton,
